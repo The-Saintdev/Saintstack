@@ -50,7 +50,7 @@ export function createMockDb(): DatabaseClient {
     },
 
     async queryRow<T = any>(queryString: string, params: any[] = []): Promise<T | null> {
-      const q = queryString.toLowerCase().trim();
+      const q = queryString.toLowerCase().replace(/\s+/g, ' ').trim();
 
       // Select single project
       if (q.includes('select') && q.includes('from projects where id = $1')) {

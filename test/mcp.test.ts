@@ -212,16 +212,59 @@ describe('SaintStack MCP Server', () => {
     expect(parsed.completed_tasks).toContain('Setup Neon schema');
   });
 
-  it('returns compact context bundle', async () => {
-    const contextRes = await handleMcpRequest(
+  it('ingests a code graph (Graphify output)', async () => {
+    const ingestRes = await handleMcpRequest(
       {
         jsonrpc: '2.0',
         id: 11,
         method: 'tools/call',
         params: {
+          name: 'saintstack_ingest_graph',
+          arguments: {
+            project_id: 'The-Saintdev/Saintstack',
+            content: 'Modules: src/index.ts -> src/mcp.ts -> src/memory.ts -> src/db.ts',
+          },
+        },
+      },
+      db
+    );
+    expect(ingestRes.error).toBeUndefined();
+    const data = JSON.parse(ingestRes.result.content[0].text);
+    expect(data.memory.category).toBe('code_map');
+  });
+
+  it('returns token-optimized Markdown context bundle by default', async () => {
+    const contextRes = await handleMcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 12,
+        method: 'tools/call',
+        params: {
           name: 'saintstack_get_context',
           arguments: {
             project_id: 'The-Saintdev/Saintstack',
+          },
+        },
+      },
+      db
+    );
+    expect(contextRes.error).toBeUndefined();
+    const text = contextRes.result.content[0].text;
+    expect(text).toContain('Project: SaintStack');
+    expect(text).toContain('Previous Session Handover');
+  });
+
+  it('returns structured JSON context bundle when format: json requested', async () => {
+    const contextRes = await handleMcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 13,
+        method: 'tools/call',
+        params: {
+          name: 'saintstack_get_context',
+          arguments: {
+            project_id: 'The-Saintdev/Saintstack',
+            format: 'json',
           },
         },
       },

@@ -13,6 +13,19 @@ describe('SaintStack REST & Hono Router', () => {
     expect(body.endpoints.mcp).toBe('/mcp');
   });
 
+  it('serves HTML dashboard when requested with text/html Accept header', async () => {
+    const res = await app.request('http://localhost/', {
+      method: 'GET',
+      headers: {
+        Accept: 'text/html',
+      },
+    });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('SaintStack Gateway');
+    expect(html).toContain('Online');
+  });
+
   it('serves health check', async () => {
     const res = await app.request('http://localhost/health', {
       method: 'GET',

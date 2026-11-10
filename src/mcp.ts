@@ -1,9 +1,9 @@
 import { DatabaseClient } from './db';
 import { McpRequest, McpResponse, McpTool } from './types';
-import { saveMemory, searchMemories, getContextBundle } from './memory';
+import { saveMemory, searchMemories, getContextBundle, formatContextAsMarkdown } from './memory';
 import { saveDecision, getDecisions } from './decisions';
 import { saveSession, getLastSession } from './sessions';
-import { upsertProject, listProjects, getProject } from './projects';
+import { upsertProject, listProjects } from './projects';
 
 export const SAINTSTACK_TOOLS: McpTool[] = [
   {
@@ -48,14 +48,34 @@ export const SAINTSTACK_TOOLS: McpTool[] = [
     },
   },
   {
+    name: 'saintstack_ingest_graph',
+    description:
+      'Ingest a code dependency graph, AST summary, or GRAPH_REPORT.md (e.g. from Graphify) into persistent project memory.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project ID' },
+        title: { type: 'string', description: 'Title of the map (default: "Codebase Map & Dependency Architecture")' },
+        content: { type: 'string', description: 'The dependency overview, call graph, or module relationships' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Tags (e.g. ["graphify", "dependencies"])' },
+      },
+      required: ['project_id', 'content'],
+    },
+  },
+  {
     name: 'saintstack_get_context',
     description:
-      'Fetch a compact context bundle containing active project info, global conventions, architecture summaries, recent decisions, and the last session handover.',
+      'Fetch a compact context bundle containing active project info, global conventions, architecture summaries, recent decisions, and the last session handover. Formats as high-density Markdown by default for maximum token savings.',
     inputSchema: {
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'Project ID (e.g. "The-Saintdev/Saintstack" or slug)' },
         query: { type: 'string', description: 'Optional topic/task to retrieve extra relevant memories' },
+        format: {
+          type: 'string',
+          enum: ['markdown', 'json'],
+          description: 'Output format. "markdown" is token-optimized (recommended), "json" provides structured objects.',
+        },
       },
     },
   },
@@ -197,7 +217,7 @@ export async function handleMcpRequest(
         const toolName = params?.name;
         const args = params?.arguments || {};
 
-        let toolOutput: any;
+        let textOutput: string;
 
         switch (toolName) {
           case 'saintstack_search_memory': {
@@ -208,7 +228,7 @@ export async function handleMcpRequest(
               tag: args.tag,
               limit: args.limit || 5,
             });
-            toolOutput = { count: memories.length, memories };
+            textOutput = JSON.stringify({ count: memories.length, memories }, null, 2);
             break;
           }
 
@@ -222,13 +242,34 @@ export async function handleMcpRequest(
               importance: args.importance,
               source: args.source,
             });
-            toolOutput = { message: 'Memory saved successfully', memory };
+            textOutput = JSON.stringify({ message: 'Memory saved successfully', memory }, null, 2);
+            break;
+          }
+
+          case 'saintstack_ingest_graph': {
+            const title = args.title || 'Codebase Map & Dependency Architecture';
+            const tags = args.tags || ['graphify', 'architecture', 'code_map'];
+            const memory = await saveMemory(db, {
+              project_id: args.project_id,
+              title,
+              content: args.content,
+              category: 'code_map',
+              tags,
+              importance: 9,
+              source: 'graphify',
+            });
+            textOutput = JSON.stringify({ message: 'Code graph ingested into project memory', memory }, null, 2);
             break;
           }
 
           case 'saintstack_get_context': {
             const bundle = await getContextBundle(db, args.project_id, args.query);
-            toolOutput = bundle;
+            if (args.format === 'json') {
+              textOutput = JSON.stringify(bundle, null, 2);
+            } else {
+              // High-density markdown format (saves ~30-40% tokens)
+              textOutput = formatContextAsMarkdown(bundle);
+            }
             break;
           }
 
@@ -243,13 +284,13 @@ export async function handleMcpRequest(
               alternatives: args.alternatives,
               status: args.status,
             });
-            toolOutput = { message: 'Decision recorded', decision };
+            textOutput = JSON.stringify({ message: 'Decision recorded', decision }, null, 2);
             break;
           }
 
           case 'saintstack_get_decisions': {
             const decisions = await getDecisions(db, args.project_id, args.status, args.limit || 10);
-            toolOutput = { count: decisions.length, decisions };
+            textOutput = JSON.stringify({ count: decisions.length, decisions }, null, 2);
             break;
           }
 
@@ -263,13 +304,13 @@ export async function handleMcpRequest(
               touched_files: args.touched_files,
               open_issues: args.open_issues,
             });
-            toolOutput = { message: 'Session handover saved', session };
+            textOutput = JSON.stringify({ message: 'Session handover saved', session }, null, 2);
             break;
           }
 
           case 'saintstack_get_session': {
             const session = await getLastSession(db, args.project_id);
-            toolOutput = session || { message: 'No previous session found for this project' };
+            textOutput = JSON.stringify(session || { message: 'No previous session found for this project' }, null, 2);
             break;
           }
 
@@ -282,13 +323,13 @@ export async function handleMcpRequest(
               default_branch: args.default_branch,
               metadata: args.metadata,
             });
-            toolOutput = { message: 'Project registered successfully', project };
+            textOutput = JSON.stringify({ message: 'Project registered successfully', project }, null, 2);
             break;
           }
 
           case 'saintstack_list_projects': {
             const projects = await listProjects(db);
-            toolOutput = { count: projects.length, projects };
+            textOutput = JSON.stringify({ count: projects.length, projects }, null, 2);
             break;
           }
 
@@ -310,7 +351,7 @@ export async function handleMcpRequest(
             content: [
               {
                 type: 'text',
-                text: JSON.stringify(toolOutput, null, 2),
+                text: textOutput,
               },
             ],
           },

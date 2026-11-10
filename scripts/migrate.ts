@@ -21,8 +21,20 @@ if (!databaseUrl) {
   process.exit(1);
 }
 
+function splitSqlStatements(sqlContent: string): string[] {
+  const cleanLines = sqlContent
+    .split('\n')
+    .map(line => (line.trim().startsWith('--') ? '' : line))
+    .join('\n');
+
+  return cleanLines
+    .split(';')
+    .map(stmt => stmt.trim())
+    .filter(stmt => stmt.length > 0);
+}
+
 async function runMigrations() {
-  console.log('Connecting to database...');
+  console.log('Connecting to Neon PostgreSQL...');
   const sql = neon(databaseUrl!);
 
   const migrationsDir = path.join(__dirname, '../migrations');
@@ -32,17 +44,23 @@ async function runMigrations() {
     console.log(`Running migration: ${file}`);
     const filePath = path.join(migrationsDir, file);
     const sqlContent = fs.readFileSync(filePath, 'utf-8');
+    const statements = splitSqlStatements(sqlContent);
 
-    try {
-      await sql.query(sqlContent);
-      console.log(`Successfully applied: ${file}`);
-    } catch (err: any) {
-      console.error(`Migration ${file} failed:`, err.message);
-      process.exit(1);
+    for (let i = 0; i < statements.length; i++) {
+      const stmt = statements[i];
+      try {
+        await sql.query(stmt);
+      } catch (err: any) {
+        console.error(`Error in statement ${i + 1} of ${file}:`, err.message);
+        console.error(`Failed SQL:`, stmt);
+        process.exit(1);
+      }
     }
+
+    console.log(`Successfully applied: ${file} (${statements.length} statements)`);
   }
 
-  console.log('All migrations applied successfully!');
+  console.log('All migrations applied successfully to Neon!');
 }
 
 runMigrations().catch(err => {

@@ -1,0 +1,6 @@
+# Cloudflare Workers Local Development Variables
+# Copy to .dev.vars for local testing (`cp .dev.vars.example .dev.vars`)
+
+DATABASE_URL="postgresql://neondb_owner:your_password@ep-cool-fog-123456.us-east-2.aws.neon.tech/neondb?sslmode=require"
+SAINTSTACK_API_KEY="saint_sec_local_dev_secret_key"
+ENVIRONMENT="development"

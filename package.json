@@ -8,7 +8,8 @@
     "deploy": "wrangler deploy",
     "db:migrate": "tsx scripts/migrate.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "package:skill": "mkdir -p dist && cd skills/saintstack-memory && zip -r -FS ../../dist/saintstack-memory.zip . -x '*.DS_Store' && echo 'Built dist/saintstack-memory.zip'"
   },
   "keywords": [
     "ai",

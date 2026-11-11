@@ -9,7 +9,8 @@
     "db:migrate": "tsx scripts/migrate.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "package:skill": "mkdir -p dist && cd skills/saintstack-memory && zip -r -FS ../../dist/saintstack-memory.zip . -x '*.DS_Store' && echo 'Built dist/saintstack-memory.zip'"
+    "package:skill": "mkdir -p dist && cd skills/saintstack-memory && zip -r -FS ../../dist/saintstack-memory.zip . -x '*.DS_Store' && echo 'Built dist/saintstack-memory.zip'",
+    "package:all": "mkdir -p dist && (cd skills/saintstack-memory && zip -r -FS ../../dist/saintstack-memory.zip . -x '*.DS_Store') && (cd skills/token-budget-guard && zip -r -FS ../../dist/token-budget-guard.zip . -x '*.DS_Store') && (cd skills/production-deploy-gate && zip -r -FS ../../dist/production-deploy-gate.zip . -x '*.DS_Store') && echo 'Built all 3 skill packages in dist/'"
   },
   "keywords": [
     "ai",

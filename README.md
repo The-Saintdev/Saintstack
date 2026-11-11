@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="SaintStack Logo" width="160" style="border-radius: 24px; box-shadow: 0 8px 32px rgba(59, 130, 246, 0.3);">
+</p>
+
 # SaintStack
 
 > **Universal persistent memory and code intelligence infrastructure for coding agents (Claude Code, OpenAI Codex, Google Antigravity).**

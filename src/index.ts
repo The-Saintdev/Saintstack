@@ -100,9 +100,17 @@ function renderDashboardHtml(host: string): string {
 <body>
   <div class="container">
     <header>
-      <div>
-        <h1>SaintStack Gateway</h1>
-        <p class="lead">Universal Persistent AI Development Memory</p>
+      <div style="display: flex; align-items: center; gap: 14px;">
+        <svg width="42" height="42" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink: 0;">
+          <ellipse cx="24" cy="9" rx="13" ry="3.5" stroke="#fbbf24" stroke-width="2.5" fill="none" style="filter: drop-shadow(0 0 6px rgba(251, 191, 36, 0.8));"/>
+          <path d="M14 16 L24 21 L34 16 L24 11 Z" fill="rgba(59, 130, 246, 0.4)" stroke="#60a5fa" stroke-width="2"/>
+          <path d="M14 24 L24 29 L34 24 L24 19 Z" fill="rgba(14, 165, 233, 0.5)" stroke="#38bdf8" stroke-width="2"/>
+          <path d="M14 32 L24 37 L34 32 L24 27 Z" fill="rgba(99, 102, 241, 0.6)" stroke="#818cf8" stroke-width="2"/>
+        </svg>
+        <div>
+          <h1>SaintStack Gateway</h1>
+          <p class="lead">Universal Persistent AI Development Memory</p>
+        </div>
       </div>
       <div class="badge"><div class="dot"></div> Online</div>
     </header>

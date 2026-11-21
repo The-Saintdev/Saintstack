@@ -66,4 +66,54 @@ describe('SaintStack REST & Hono Router', () => {
     const body = (await res.json()) as any;
     expect(body.status).toContain('SaintStack MCP Server Ready');
   });
+
+  it('returns 202 for JSON-RPC notifications without id', async () => {
+    const res = await app.request(
+      'http://localhost/mcp',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-secret-key-123',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'notifications/initialized',
+        }),
+      },
+      {
+        DATABASE_URL: 'postgres://dummy',
+        SAINTSTACK_API_KEY: 'test-secret-key-123',
+      }
+    );
+    expect(res.status).toBe(202);
+  });
+
+  it('returns 405 for GET /mcp requesting SSE stream and 404 for well-known probes', async () => {
+    const sseRes = await app.request(
+      'http://localhost/mcp',
+      {
+        method: 'GET',
+        headers: {
+          Authorization: 'Bearer test-secret-key-123',
+          Accept: 'text/event-stream',
+        },
+      },
+      {
+        DATABASE_URL: 'postgres://dummy',
+        SAINTSTACK_API_KEY: 'test-secret-key-123',
+      }
+    );
+    expect(sseRes.status).toBe(405);
+
+    const wkRes = await app.request(
+      'http://localhost/.well-known/oauth-protected-resource',
+      { method: 'GET' },
+      {
+        DATABASE_URL: 'postgres://dummy',
+        SAINTSTACK_API_KEY: 'test-secret-key-123',
+      }
+    );
+    expect(wkRes.status).toBe(404);
+  });
 });

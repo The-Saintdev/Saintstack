@@ -18,11 +18,23 @@ describe('SaintStack MCP Server', () => {
 
     expect(res.jsonrpc).toBe('2.0');
     expect(res.id).toBe(1);
+    expect(res.result.protocolVersion).toBe('2024-11-05');
     expect(res.result.serverInfo.name).toBe('saintstack');
     expect(res.result.capabilities.tools).toBeDefined();
+
+    const modern = await handleMcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 100,
+        method: 'initialize',
+        params: { protocolVersion: '2025-06-18' },
+      },
+      db
+    );
+    expect(modern.result.protocolVersion).toBe('2025-06-18');
   });
 
-  it('lists all available SaintStack tools', async () => {
+  it('lists all available SaintStack tools with Claude-required annotations', async () => {
     const res = await handleMcpRequest(
       {
         jsonrpc: '2.0',
@@ -33,6 +45,10 @@ describe('SaintStack MCP Server', () => {
     );
 
     expect(res.result.tools).toHaveLength(SAINTSTACK_TOOLS.length);
+    for (const tool of res.result.tools) {
+      expect(typeof tool.annotations?.readOnlyHint).toBe('boolean');
+      expect(typeof tool.annotations?.destructiveHint).toBe('boolean');
+    }
     const toolNames = res.result.tools.map((t: any) => t.name);
     expect(toolNames).toContain('saintstack_search_memory');
     expect(toolNames).toContain('saintstack_save_memory');

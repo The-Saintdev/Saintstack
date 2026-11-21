@@ -10,6 +10,7 @@ export const SAINTSTACK_TOOLS: McpTool[] = [
     name: 'saintstack_search_memory',
     description:
       'Search persistent memories across global rules and project-specific knowledge. Use this to find conventions, patterns, or architecture facts before writing code.',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -29,6 +30,7 @@ export const SAINTSTACK_TOOLS: McpTool[] = [
     name: 'saintstack_save_memory',
     description:
       'Save durable knowledge, architectural patterns, conventions, or facts so all AI agents (Claude, Codex, Antigravity) remember them in future sessions.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -51,6 +53,7 @@ export const SAINTSTACK_TOOLS: McpTool[] = [
     name: 'saintstack_ingest_graph',
     description:
       'Ingest a code dependency graph, AST summary, or GRAPH_REPORT.md (e.g. from Graphify) into persistent project memory.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -66,6 +69,7 @@ export const SAINTSTACK_TOOLS: McpTool[] = [
     name: 'saintstack_get_context',
     description:
       'Fetch a compact context bundle containing active project info, global conventions, architecture summaries, recent decisions, and the last session handover. Formats as high-density Markdown by default for maximum token savings.',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -83,6 +87,7 @@ export const SAINTSTACK_TOOLS: McpTool[] = [
     name: 'saintstack_save_decision',
     description:
       'Record an Architectural Decision Record (ADR) including context, rationale, and alternatives considered.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -105,6 +110,7 @@ export const SAINTSTACK_TOOLS: McpTool[] = [
   {
     name: 'saintstack_get_decisions',
     description: 'Retrieve previous architectural decisions recorded for a project.',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -119,6 +125,7 @@ export const SAINTSTACK_TOOLS: McpTool[] = [
     name: 'saintstack_save_session',
     description:
       'Save session progress and handover summary at the end of a development session so future sessions continue seamlessly.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -136,6 +143,7 @@ export const SAINTSTACK_TOOLS: McpTool[] = [
   {
     name: 'saintstack_get_session',
     description: 'Retrieve the most recent session handover summary for a project.',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -147,6 +155,7 @@ export const SAINTSTACK_TOOLS: McpTool[] = [
   {
     name: 'saintstack_register_project',
     description: 'Register or update project metadata in the SaintStack registry.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -163,12 +172,15 @@ export const SAINTSTACK_TOOLS: McpTool[] = [
   {
     name: 'saintstack_list_projects',
     description: 'List all projects registered in SaintStack.',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {},
     },
   },
 ];
+
+const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25']);
 
 export async function handleMcpRequest(
   request: McpRequest,
@@ -179,11 +191,16 @@ export async function handleMcpRequest(
   try {
     switch (method) {
       case 'initialize': {
+        const requested = params?.protocolVersion;
+        const protocolVersion =
+          typeof requested === 'string' && SUPPORTED_PROTOCOL_VERSIONS.has(requested)
+            ? requested
+            : '2025-03-26';
         return {
           jsonrpc: '2.0',
           id,
           result: {
-            protocolVersion: '2024-11-05',
+            protocolVersion,
             capabilities: {
               tools: { listChanged: false },
             },

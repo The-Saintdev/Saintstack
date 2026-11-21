@@ -11,8 +11,16 @@ import { saveSession, getLastSession, listSessions } from './sessions';
 
 const app = new Hono<{ Bindings: Env }>();
 
-// Enable CORS for cross-origin tools and web UIs
-app.use('*', cors());
+// Enable CORS for cross-origin tools, browser extensions, and web UIs
+app.use(
+  '*',
+  cors({
+    origin: '*',
+    allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+    allowHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'mcp-protocol-version', 'mcp-session-id', 'Accept'],
+    exposeHeaders: ['mcp-session-id'],
+  })
+);
 
 // Helper to render the web dashboard HTML
 function renderDashboardHtml(host: string): string {
@@ -179,8 +187,8 @@ app.get('/health', (c) => {
 // Authentication middleware for /mcp and /api
 app.use('*', async (c, next) => {
   const path = c.req.path;
-  // Skip auth for root, dashboard, and health check
-  if (path === '/' || path === '/health' || path === '/dashboard') {
+  // Skip auth for root, dashboard, health check, and OAuth well-known discovery probes
+  if (path === '/' || path === '/health' || path === '/dashboard' || path.startsWith('/.well-known/')) {
     return next();
   }
 
@@ -201,12 +209,29 @@ app.use('*', async (c, next) => {
   return next();
 });
 
-// MCP Endpoint (Supports JSON-RPC 2.0 POST)
+// MCP Endpoint (Supports JSON-RPC 2.0 Streamable HTTP POST, notifications, and batches)
 app.post('/mcp', async (c) => {
   const db = getDb(c.env.DATABASE_URL);
   try {
-    const body = await c.req.json<McpRequest>();
+    const body = await c.req.json<McpRequest | McpRequest[]>();
+
+    if (Array.isArray(body)) {
+      const responses = await Promise.all(
+        body
+          .filter((req) => req.id !== undefined && req.id !== null)
+          .map((req) => handleMcpRequest(req, db))
+      );
+      if (responses.length === 0) {
+        return c.body(null, 202);
+      }
+      return c.json(responses);
+    }
+
     const response = await handleMcpRequest(body, db);
+    // JSON-RPC notifications (no id) must return 202 Accepted with empty body per MCP Streamable HTTP spec
+    if (body.id === undefined || body.id === null) {
+      return c.body(null, 202);
+    }
     return c.json(response);
   } catch (err: any) {
     return c.json(
@@ -223,13 +248,23 @@ app.post('/mcp', async (c) => {
   }
 });
 
-// MCP Discovery GET
+// MCP Discovery GET (or 405 for Streamable HTTP SSE listener requests)
 app.get('/mcp', (c) => {
+  const accept = c.req.header('Accept') || '';
+  if (accept.includes('text/event-stream') && !accept.includes('application/json')) {
+    return c.text('Method Not Allowed: server-initiated SSE streams are not enabled; use POST /mcp.', 405);
+  }
+
   return c.json({
     status: 'SaintStack MCP Server Ready',
     protocol: 'JSON-RPC 2.0 / Streamable HTTP',
     tools: SAINTSTACK_TOOLS,
   });
+});
+
+// MCP Session teardown
+app.delete('/mcp', (c) => {
+  return c.body(null, 204);
 });
 
 // --- REST API Fallback Endpoints ---

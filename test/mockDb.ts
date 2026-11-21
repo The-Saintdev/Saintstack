@@ -11,9 +11,18 @@ export function createMockDb(): DatabaseClient {
 
   let idCounter = 1;
 
+  const assertSqlParams = (queryString: string, params: any[]) => {
+    const matches = queryString.match(/\$(\d+)/g) || [];
+    const maxParam = matches.reduce((max, m) => Math.max(max, Number(m.slice(1))), 0);
+    if (maxParam > params.length) {
+      throw new Error(`PostgreSQL parameter error: SQL references $${maxParam}, but only ${params.length} parameters supplied.`);
+    }
+  };
+
   const mockClient: DatabaseClient = {
     sql: (() => {}) as any,
     async query<T = any>(queryString: string, params: any[] = []): Promise<T[]> {
+      assertSqlParams(queryString, params);
       const q = queryString.toLowerCase().replace(/\s+/g, ' ').trim();
 
       if (q.startsWith('create table if not exists') || q.startsWith('create index if not exists')) {
@@ -81,10 +90,15 @@ export function createMockDb(): DatabaseClient {
       // Memories
       if (q.includes('select') && q.includes('from memories')) {
         let res = Array.from(memories.values());
-        if (params.length > 0) {
+        if (q.includes("(project_id is null or lower(project_id) = 'global')") && !q.includes('project_id = $')) {
+          res = res.filter((m) => m.project_id === null || m.project_id?.toLowerCase() === 'global');
+        } else if (q.includes('project_id = $') && !q.includes('or project_id is null')) {
+          const p = params[1];
+          res = res.filter((m) => m.project_id === p);
+        } else if (params.length > 0) {
           const p = params[params.length - 2];
           if (typeof p === 'string' && !p.startsWith('%')) {
-            res = res.filter((m) => m.project_id === p || m.project_id === null);
+            res = res.filter((m) => m.project_id === p || m.project_id === null || m.project_id?.toLowerCase() === 'global');
           }
         }
         return res as unknown as T[];
@@ -94,6 +108,7 @@ export function createMockDb(): DatabaseClient {
     },
 
     async queryRow<T = any>(queryString: string, params: any[] = []): Promise<T | null> {
+      assertSqlParams(queryString, params);
       const q = queryString.toLowerCase().replace(/\s+/g, ' ').trim();
 
       // Custom tables
@@ -202,10 +217,11 @@ export function createMockDb(): DatabaseClient {
       }
 
       // Select single memory
-      if (q.includes('select id from memories where') && q.includes('lower(title) = lower($3)')) {
-        const projId = params[0];
-        const cat = params[1];
-        const title = (params[2] || '').toLowerCase();
+      if (q.includes('select id from memories where') && q.includes('lower(title) = lower(')) {
+        const isNullScope = q.includes('project_id is null');
+        const projId = isNullScope ? null : params[0];
+        const cat = isNullScope ? params[0] : params[1];
+        const title = (isNullScope ? params[1] : params[2] || '').toLowerCase();
         for (const m of memories.values()) {
           if (
             (m.project_id === projId || (!m.project_id && !projId)) &&

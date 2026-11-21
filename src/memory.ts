@@ -22,10 +22,15 @@ export async function saveMemory(
   const importance = Math.min(10, Math.max(1, memory.importance ?? 5));
   const source = memory.source || 'agent';
   const tagsJson = JSON.stringify(memory.tags || []);
-  const projectId = memory.project_id ? memory.project_id.trim() : null;
+  const rawProjectId = typeof memory.project_id === 'string' ? memory.project_id.trim() : '';
+  const projectId = rawProjectId.length > 0 ? rawProjectId : null;
 
-  // Invalidate edge cache for this project
-  memoryCache.invalidate(projectId || undefined);
+  // Invalidate edge cache (global memories affect every project's context bundle)
+  if (!projectId || projectId.toLowerCase() === 'global') {
+    memoryCache.invalidate();
+  } else {
+    memoryCache.invalidate(projectId);
+  }
 
   // If ID provided, update existing
   if (memory.id) {
@@ -48,7 +53,7 @@ export async function saveMemory(
     );
   } else {
     existing = await db.queryRow<Memory>(
-      `SELECT id FROM memories WHERE project_id IS NULL AND category = $2 AND LOWER(title) = LOWER($3) LIMIT 1`,
+      `SELECT id FROM memories WHERE project_id IS NULL AND category = $1 AND LOWER(title) = LOWER($2) LIMIT 1`,
       [category, memory.title.trim()]
     );
   }
@@ -64,10 +69,10 @@ export async function saveMemory(
     return updated!;
   }
 
-  // Otherwise, insert fresh memory
+  // Otherwise, insert fresh memory ($1::text prevents Postgres unknown-param type errors when project_id is null)
   const created = await db.queryRow<Memory>(
     `INSERT INTO memories (project_id, category, title, content, tags, importance, source, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, NOW(), NOW())
+     VALUES ($1::text, $2, $3, $4, $5::jsonb, $6, $7, NOW(), NOW())
      RETURNING id, project_id, category, title, content, tags, importance, source, created_at, updated_at`,
     [projectId, category, memory.title.trim(), memory.content, tagsJson, importance, source]
   );
@@ -81,6 +86,7 @@ export interface SearchOptions {
   category?: MemoryCategory;
   tag?: string;
   includeGlobal?: boolean;
+  globalOnly?: boolean;
   minImportance?: number;
   limit?: number;
 }
@@ -92,22 +98,25 @@ export async function searchMemories(
   const limit = Math.min(50, Math.max(1, options.limit ?? 10));
   const minImportance = options.minImportance ?? 1;
   const includeGlobal = options.includeGlobal !== false;
+  const rawProjectId = typeof options.projectId === 'string' ? options.projectId.trim() : '';
+  const projectId = rawProjectId.length > 0 ? rawProjectId : null;
 
   const conditions: string[] = ['importance >= $1'];
   const params: any[] = [minImportance];
 
   // Project filtering
-  if (options.projectId) {
+  if (options.globalOnly) {
+    conditions.push(`(project_id IS NULL OR LOWER(project_id) = 'global')`);
+  } else if (projectId) {
     if (includeGlobal) {
-      params.push(options.projectId);
-      conditions.push(`(project_id = $${params.length} OR project_id IS NULL)`);
+      params.push(projectId);
+      conditions.push(`(project_id = $${params.length} OR project_id IS NULL OR LOWER(project_id) = 'global')`);
     } else {
-      params.push(options.projectId);
+      params.push(projectId);
       conditions.push(`project_id = $${params.length}`);
     }
   } else if (!includeGlobal) {
-    // Only global
-    conditions.push(`project_id IS NULL`);
+    conditions.push(`(project_id IS NULL OR LOWER(project_id) = 'global')`);
   }
 
   // Category filter
@@ -163,45 +172,49 @@ export async function getContextBundle(
   projectId?: string | null,
   query?: string
 ): Promise<ContextBundle> {
-  const cacheKey = `ctx_${projectId || 'all'}_${query || ''}`;
+  const rawProj = typeof projectId === 'string' ? projectId.trim() : '';
+  const targetProjectId = rawProj.length > 0 ? rawProj : null;
+  const isGlobalScope = !targetProjectId || targetProjectId.toLowerCase() === 'global';
+
+  const cacheKey = `ctx_${targetProjectId || 'global'}_${query || ''}`;
   const cached = memoryCache.get<ContextBundle>(cacheKey);
   if (cached) {
     return cached;
   }
 
-  // 1. Fetch project if provided
-  const project = projectId ? await getProject(db, projectId) : null;
+  // 1. Fetch requested project, or fall back to the 'global' project if registered
+  const project = targetProjectId ? await getProject(db, targetProjectId) : await getProject(db, 'global');
+  const scopeProjectId = targetProjectId || project?.id || null;
 
-  // 2. Fetch global high-importance conventions (importance >= 7)
+  // 2. Fetch global memories/conventions (both project_id IS NULL and project_id = 'global')
   const globalConventions = await searchMemories(db, {
-    projectId: null,
-    includeGlobal: false,
-    minImportance: 7,
-    limit: 5,
+    globalOnly: true,
+    minImportance: isGlobalScope ? 1 : 5,
+    limit: isGlobalScope ? 10 : 8,
   });
 
-  // 3. Fetch project architecture memories if project provided
+  // 3. Fetch project architecture memories when a specific non-global project is requested
   let projectArchitecture: Memory[] = [];
-  if (projectId) {
+  if (targetProjectId && targetProjectId.toLowerCase() !== 'global') {
     projectArchitecture = await searchMemories(db, {
-      projectId,
+      projectId: targetProjectId,
       includeGlobal: false,
       category: 'architecture',
       limit: 5,
     });
   }
 
-  // 4. Fetch recent decisions
-  const recentDecisions = projectId ? await getDecisions(db, projectId, undefined, 5) : [];
+  // 4. Fetch recent decisions for the project (or global project)
+  const recentDecisions = scopeProjectId ? await getDecisions(db, scopeProjectId, undefined, 5) : [];
 
-  // 5. Fetch last session handover
-  const lastSession = projectId ? await getLastSession(db, projectId) : null;
+  // 5. Fetch last session handover for the project (or global project)
+  const lastSession = scopeProjectId ? await getLastSession(db, scopeProjectId) : null;
 
   // 6. If a specific query was provided, search relevant memories
   let relevantMemories: Memory[] = [];
   if (query && query.trim().length > 0) {
     relevantMemories = await searchMemories(db, {
-      projectId: projectId || undefined,
+      projectId: targetProjectId || undefined,
       query,
       limit: 5,
     });
@@ -264,5 +277,5 @@ export function formatContextAsMarkdown(bundle: ContextBundle): string {
     sections.push(`### Relevant Project Knowledge\n${items}`);
   }
 
-  return sections.join('\n\n');
+  return sections.length > 0 ? sections.join('\n\n') : 'No context recorded yet in SaintStack.';
 }

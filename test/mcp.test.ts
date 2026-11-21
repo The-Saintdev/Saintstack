@@ -291,4 +291,99 @@ describe('SaintStack MCP Server', () => {
     expect(bundle.project).toBeDefined();
     expect(bundle.last_session).toBeDefined();
   });
+
+  it('saves memories with null or empty project_id and surfaces global + global-project context when project_id is omitted', async () => {
+    const isolatedDb = createMockDb();
+
+    // 1. Register a "global" project + save a memory inside it (user's workaround scenario)
+    await handleMcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 20,
+        method: 'tools/call',
+        params: {
+          name: 'saintstack_register_project',
+          arguments: { id: 'global', name: 'Global Rules' },
+        },
+      },
+      isolatedDb
+    );
+    const saveGlobalProjMem = await handleMcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 21,
+        method: 'tools/call',
+        params: {
+          name: 'saintstack_save_memory',
+          arguments: {
+            project_id: 'global',
+            title: 'Master Workflow Protocol',
+            content: 'Always sync SaintStack before and after tasks.',
+            category: 'convention',
+            importance: 10,
+          },
+        },
+      },
+      isolatedDb
+    );
+    expect(saveGlobalProjMem.error).toBeUndefined();
+
+    // 2. Save memory with project_id: null and empty project_id: ""
+    const saveNull = await handleMcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 22,
+        method: 'tools/call',
+        params: {
+          name: 'saintstack_save_memory',
+          arguments: {
+            project_id: null,
+            title: 'Unscoped Global Fact',
+            content: 'Stored directly with NULL project_id.',
+            importance: 8,
+          },
+        },
+      },
+      isolatedDb
+    );
+    expect(saveNull.error).toBeUndefined();
+
+    const saveEmpty = await handleMcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 23,
+        method: 'tools/call',
+        params: {
+          name: 'saintstack_save_memory',
+          arguments: {
+            project_id: '',
+            title: 'Unscoped Global Fact',
+            content: 'Updated via empty string project_id without Postgres error.',
+            importance: 9,
+          },
+        },
+      },
+      isolatedDb
+    );
+    expect(saveEmpty.error).toBeUndefined();
+
+    // 3. Call saintstack_get_context with NO project_id -> returns global project + both global memories!
+    const ctxNoProj = await handleMcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 24,
+        method: 'tools/call',
+        params: {
+          name: 'saintstack_get_context',
+          arguments: {},
+        },
+      },
+      isolatedDb
+    );
+    expect(ctxNoProj.error).toBeUndefined();
+    const md = ctxNoProj.result.content[0].text;
+    expect(md).toContain('Global Rules');
+    expect(md).toContain('Master Workflow Protocol');
+    expect(md).toContain('Unscoped Global Fact');
+  });
 });

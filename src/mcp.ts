@@ -4,6 +4,15 @@ import { saveMemory, searchMemories, getContextBundle, formatContextAsMarkdown }
 import { saveDecision, getDecisions } from './decisions';
 import { saveSession, getLastSession } from './sessions';
 import { upsertProject, listProjects } from './projects';
+import {
+  createOrUpdateTable,
+  deleteRow,
+  deleteTable,
+  insertRows,
+  listTables,
+  queryRows,
+  updateRow,
+} from './tables';
 
 export const SAINTSTACK_TOOLS: McpTool[] = [
   {
@@ -178,6 +187,118 @@ export const SAINTSTACK_TOOLS: McpTool[] = [
       properties: {},
     },
   },
+  {
+    name: 'saintstack_create_table',
+    description:
+      'Create a new custom table (or add/update columns on an existing table) so agents can store structured entries (e.g. job_applications, leads, tasks, expenses).',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Table name (lowercase letters, numbers, underscores, e.g. "leads")' },
+        description: { type: 'string', description: 'What this table stores' },
+        project_id: { type: 'string', description: 'Optional project scope' },
+        columns: {
+          type: 'array',
+          description: 'Optional schema column definitions',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'Column name (lowercase_snake_case)' },
+              type: { type: 'string', enum: ['text', 'number', 'boolean', 'date', 'json'], description: 'Field type (default: text)' },
+              required: { type: 'boolean', description: 'Whether rows must include this field' },
+              description: { type: 'string', description: 'Field description' },
+            },
+            required: ['name'],
+          },
+        },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'saintstack_list_tables',
+    description: 'List custom tables created in SaintStack along with their schemas and row counts.',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Optional project filter' },
+      },
+    },
+  },
+  {
+    name: 'saintstack_insert_rows',
+    description:
+      'Insert one or multiple new row entries into a custom table. Automatically creates the table from the entry fields if it does not exist yet (unless auto_create is false).',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table_name: { type: 'string', description: 'Target custom table name' },
+        row: { type: 'object', description: 'Single row object to insert' },
+        rows: { type: 'array', items: { type: 'object' }, description: 'Array of row objects for batch insert' },
+        auto_create: { type: 'boolean', description: 'Create table automatically if missing (default: true)' },
+        project_id: { type: 'string', description: 'Optional project_id if auto-creating the table' },
+      },
+      required: ['table_name'],
+    },
+  },
+  {
+    name: 'saintstack_query_rows',
+    description: 'Query and filter rows from a custom table.',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table_name: { type: 'string', description: 'Custom table name' },
+        filter: { type: 'object', description: 'Exact key-value JSON match filter (e.g. { "status": "applied" })' },
+        search: { type: 'string', description: 'Case-insensitive text search across row values' },
+        limit: { type: 'number', description: 'Max rows to return (default: 25, max: 200)' },
+        offset: { type: 'number', description: 'Pagination offset (default: 0)' },
+      },
+      required: ['table_name'],
+    },
+  },
+  {
+    name: 'saintstack_update_row',
+    description: 'Update specific fields on an existing row in a custom table.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table_name: { type: 'string', description: 'Custom table name' },
+        row_id: { type: 'string', description: 'Row UUID to update' },
+        data: { type: 'object', description: 'Fields to merge into the existing row' },
+      },
+      required: ['table_name', 'row_id', 'data'],
+    },
+  },
+  {
+    name: 'saintstack_delete_row',
+    description: 'Delete a single row from a custom table.',
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table_name: { type: 'string', description: 'Custom table name' },
+        row_id: { type: 'string', description: 'Row UUID to delete' },
+      },
+      required: ['table_name', 'row_id'],
+    },
+  },
+  {
+    name: 'saintstack_delete_table',
+    description: 'Delete a custom table and all of its rows.',
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table_name: { type: 'string', description: 'Custom table name to delete' },
+      },
+      required: ['table_name'],
+    },
+  },
 ];
 
 const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25']);
@@ -347,6 +468,76 @@ export async function handleMcpRequest(
           case 'saintstack_list_projects': {
             const projects = await listProjects(db);
             textOutput = JSON.stringify({ count: projects.length, projects }, null, 2);
+            break;
+          }
+
+          case 'saintstack_create_table': {
+            const res = await createOrUpdateTable(db, {
+              name: args.name,
+              description: args.description,
+              project_id: args.project_id,
+              columns: args.columns,
+            });
+            textOutput = JSON.stringify(
+              { message: res.created ? 'Table created' : 'Table updated', created: res.created, table: res.table },
+              null,
+              2
+            );
+            break;
+          }
+
+          case 'saintstack_list_tables': {
+            const tables = await listTables(db, args.project_id);
+            textOutput = JSON.stringify({ count: tables.length, tables }, null, 2);
+            break;
+          }
+
+          case 'saintstack_insert_rows': {
+            const items = Array.isArray(args.rows) ? args.rows : args.row ? [args.row] : [];
+            const res = await insertRows(db, args.table_name, items, {
+              autoCreate: args.auto_create !== false,
+              projectId: args.project_id,
+            });
+            textOutput = JSON.stringify(
+              { inserted_count: res.rows.length, table: res.table.name, rows: res.rows },
+              null,
+              2
+            );
+            break;
+          }
+
+          case 'saintstack_query_rows': {
+            const res = await queryRows(db, args.table_name, {
+              filter: args.filter,
+              search: args.search,
+              limit: args.limit,
+              offset: args.offset,
+            });
+            textOutput = JSON.stringify({ table: res.table.name, count: res.rows.length, rows: res.rows }, null, 2);
+            break;
+          }
+
+          case 'saintstack_update_row': {
+            const row = await updateRow(db, args.table_name, args.row_id, args.data);
+            textOutput = JSON.stringify({ message: 'Row updated', row }, null, 2);
+            break;
+          }
+
+          case 'saintstack_delete_row': {
+            const deleted = await deleteRow(db, args.table_name, args.row_id);
+            if (!deleted) {
+              throw new Error(`Row "${args.row_id}" not found in table "${args.table_name}".`);
+            }
+            textOutput = JSON.stringify({ deleted: true, table: args.table_name, row_id: args.row_id }, null, 2);
+            break;
+          }
+
+          case 'saintstack_delete_table': {
+            const deleted = await deleteTable(db, args.table_name);
+            if (!deleted) {
+              throw new Error(`Table "${args.table_name}" not found.`);
+            }
+            textOutput = JSON.stringify({ deleted: true, table: args.table_name }, null, 2);
             break;
           }
 

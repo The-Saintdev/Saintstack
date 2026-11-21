@@ -107,3 +107,31 @@ export interface McpTool {
     required?: string[];
   };
 }
+
+export type CustomColumnType = 'text' | 'number' | 'boolean' | 'date' | 'json';
+
+export interface CustomTableColumn {
+  name: string;
+  type: CustomColumnType;
+  required?: boolean;
+  description?: string;
+}
+
+export interface CustomTable {
+  name: string;
+  project_id?: string | null;
+  description?: string | null;
+  columns: CustomTableColumn[];
+  row_count?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface CustomRow {
+  id: string;
+  table_name: string;
+  data: Record<string, any>;
+  created_at?: string;
+  updated_at?: string;
+}
+

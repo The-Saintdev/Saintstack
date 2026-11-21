@@ -9,6 +9,16 @@ import { upsertProject, listProjects, getProject, deleteProject } from './projec
 import { saveDecision, getDecisions } from './decisions';
 import { saveSession, getLastSession, listSessions } from './sessions';
 import {
+  createOrUpdateTable,
+  deleteRow,
+  deleteTable,
+  getTable,
+  insertRows,
+  listTables,
+  queryRows,
+  updateRow,
+} from './tables';
+import {
   buildAuthorizationServerMetadata,
   buildProtectedResourceMetadata,
   getOrigin,
@@ -543,6 +553,99 @@ app.post('/api/v1/sessions', async (c) => {
   const body = await c.req.json();
   const session = await saveSession(db, body);
   return c.json({ message: 'Session saved', session });
+});
+
+// Custom Tables & Rows
+app.get('/api/v1/tables', async (c) => {
+  const db = getDb(c.env.DATABASE_URL);
+  const projectId = c.req.query('project_id');
+  const tables = await listTables(db, projectId);
+  return c.json({ count: tables.length, tables });
+});
+
+app.get('/api/v1/tables/:name', async (c) => {
+  const db = getDb(c.env.DATABASE_URL);
+  try {
+    const table = await getTable(db, c.req.param('name'));
+    if (!table) return c.json({ error: 'Table not found' }, 404);
+    return c.json(table);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 400);
+  }
+});
+
+app.post('/api/v1/tables', async (c) => {
+  const db = getDb(c.env.DATABASE_URL);
+  try {
+    const body = await c.req.json();
+    const res = await createOrUpdateTable(db, body);
+    return c.json({ message: res.created ? 'Table created' : 'Table updated', ...res }, res.created ? 201 : 200);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 400);
+  }
+});
+
+app.delete('/api/v1/tables/:name', async (c) => {
+  const db = getDb(c.env.DATABASE_URL);
+  try {
+    const deleted = await deleteTable(db, c.req.param('name'));
+    if (!deleted) return c.json({ error: 'Table not found' }, 404);
+    return c.json({ message: 'Table deleted' });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 400);
+  }
+});
+
+app.get('/api/v1/tables/:name/rows', async (c) => {
+  const db = getDb(c.env.DATABASE_URL);
+  try {
+    const search = c.req.query('search');
+    const limit = c.req.query('limit') ? parseInt(c.req.query('limit')!, 10) : undefined;
+    const offset = c.req.query('offset') ? parseInt(c.req.query('offset')!, 10) : undefined;
+    const filterRaw = c.req.query('filter');
+    const filter = filterRaw ? JSON.parse(filterRaw) : undefined;
+    const res = await queryRows(db, c.req.param('name'), { filter, search, limit, offset });
+    return c.json({ table: res.table.name, count: res.rows.length, rows: res.rows });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 400);
+  }
+});
+
+app.post('/api/v1/tables/:name/rows', async (c) => {
+  const db = getDb(c.env.DATABASE_URL);
+  try {
+    const body = await c.req.json();
+    const items = Array.isArray(body?.rows) ? body.rows : body?.row ? [body.row] : Array.isArray(body) ? body : [body];
+    const res = await insertRows(db, c.req.param('name'), items, {
+      autoCreate: body?.auto_create !== false,
+      projectId: body?.project_id,
+    });
+    return c.json({ message: 'Rows inserted', inserted_count: res.rows.length, table: res.table, rows: res.rows }, 201);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 400);
+  }
+});
+
+app.patch('/api/v1/tables/:name/rows/:rowId', async (c) => {
+  const db = getDb(c.env.DATABASE_URL);
+  try {
+    const body = await c.req.json();
+    const row = await updateRow(db, c.req.param('name'), c.req.param('rowId'), body?.data ?? body);
+    return c.json({ message: 'Row updated', row });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 400);
+  }
+});
+
+app.delete('/api/v1/tables/:name/rows/:rowId', async (c) => {
+  const db = getDb(c.env.DATABASE_URL);
+  try {
+    const deleted = await deleteRow(db, c.req.param('name'), c.req.param('rowId'));
+    if (!deleted) return c.json({ error: 'Row not found' }, 404);
+    return c.json({ message: 'Row deleted' });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 400);
+  }
 });
 
 export default app;

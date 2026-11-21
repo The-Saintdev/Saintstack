@@ -1,32 +1,84 @@
 # Client Integrations Guide
 
-Connect your coding assistants to your deployed SaintStack server (`https://saintstack.<your-subdomain>.workers.dev/mcp`).
+Connect your coding assistants to your deployed SaintStack server (`https://<your-saintstack-domain>/mcp`).
+
+SaintStack supports **both**:
+1. **OAuth 2.1 + PKCE + Dynamic Client Registration (DCR)** — for one-click connections from Claude.ai, Claude Mobile, Claude in Chrome, and OAuth-based extensions (such as Kilo Code Browser Extension).
+2. **Static Bearer / API Key Auth** — via `Authorization: Bearer <YOUR_SAINTSTACK_API_KEY>` or `x-api-key: <YOUR_SAINTSTACK_API_KEY>` for CLI and desktop clients.
 
 ---
 
-### 1. Claude Code
+### 1. Claude (Web, Mobile, Claude in Chrome, & Claude Code)
 
-Run the MCP add command:
+#### Claude.ai / Claude Mobile / Claude in Chrome (Account-Wide)
+1. On **claude.ai** (or Claude Desktop), go to **Customize → Connectors → + Add → Add custom connector**.
+2. Enter Name: `SaintStack` and URL: `https://<your-saintstack-domain>/mcp` → click **Continue**.
+3. If using **OAuth** (recommended): click **Connect**, enter your `SAINTSTACK_API_KEY` on the SaintStack approval screen, and click **Approve & Connect**.
+   - Alternatively, if your account has **Request headers** enabled, select **No sign-in** and add `Authorization: Bearer <YOUR_SAINTSTACK_API_KEY>`.
+4. Once connected, SaintStack is automatically available across **claude.ai**, **Claude Mobile (iOS/Android)**, and **Claude in Chrome** (Cowork side panel).
+
+#### Claude Code CLI
 ```bash
-claude mcp add --transport http --scope user saintstack https://saintstack.<your-subdomain>.workers.dev/mcp \
+claude mcp add --transport http --scope user saintstack https://<your-saintstack-domain>/mcp \
   --header "Authorization: Bearer <YOUR_SAINTSTACK_API_KEY>"
 ```
 
-For the Claude mobile / web app:
-1. Open **Settings** → **Connectors**.
-2. Click **Add custom connector**.
-3. Set the URL to your SaintStack `/mcp` endpoint and supply your Bearer authorization header.
+---
+
+### 2. OpenCode (Desktop App & CLI) + OpenCode Browse
+
+OpenCode reads MCP config from `~/.config/opencode/opencode.json` (global) or `./opencode.json` (project), and also supports OAuth (`opencode mcp auth`) or static headers:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "saintstack": {
+      "type": "remote",
+      "url": "https://<your-saintstack-domain>/mcp",
+      "oauth": false,
+      "headers": {
+        "Authorization": "Bearer <YOUR_SAINTSTACK_API_KEY>"
+      },
+      "enabled": true
+    }
+  }
+}
+```
+If you also pair **OpenCode Browse** (`browse install`), both `saintstack` and `browse` run side by side inside OpenCode.
 
 ---
 
-### 2. Google Antigravity
+### 3. Kilo Code (Browser Extension, VS Code, & CLI)
 
-In your global configuration file (`~/.gemini/config/mcp_config.json`):
+- **Kilo Code Browser Extension (Chrome / Firefox)**: Supports remote MCP over **OAuth 2.1**. Add `https://<your-saintstack-domain>/mcp` as a remote MCP server, complete the OAuth sign-in popup, and enter your `SAINTSTACK_API_KEY`.
+- **Kilo Code VS Code / CLI** (`~/.config/kilo/kilo.jsonc`):
+  ```jsonc
+  {
+    "mcp": {
+      "saintstack": {
+        "type": "remote",
+        "url": "https://<your-saintstack-domain>/mcp",
+        "headers": {
+          "Authorization": "Bearer <YOUR_SAINTSTACK_API_KEY>"
+        },
+        "oauth": false,
+        "enabled": true
+      }
+    }
+  }
+  ```
+
+---
+
+### 4. Google Antigravity
+
+In `~/.gemini/config/mcp_config.json`:
 ```json
 {
   "mcpServers": {
     "saintstack": {
-      "serverUrl": "https://saintstack.<your-subdomain>.workers.dev/mcp",
+      "serverUrl": "https://<your-saintstack-domain>/mcp",
       "headers": {
         "Authorization": "Bearer <YOUR_SAINTSTACK_API_KEY>"
       }
@@ -37,10 +89,9 @@ In your global configuration file (`~/.gemini/config/mcp_config.json`):
 
 ---
 
-### 3. OpenAI Codex / Agents
+### 5. OpenAI Codex
 
-Add the server via Codex CLI or configuration:
 ```bash
-codex mcp add saintstack --url https://saintstack.<your-subdomain>.workers.dev/mcp
+codex mcp add saintstack --url https://<your-saintstack-domain>/mcp
 ```
-Or define in your custom connector settings with your `Authorization: Bearer <YOUR_SAINTSTACK_API_KEY>`.
+Or configure the remote MCP URL with `Authorization: Bearer <YOUR_SAINTSTACK_API_KEY>`.

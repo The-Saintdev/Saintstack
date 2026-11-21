@@ -107,13 +107,29 @@ describe('SaintStack REST & Hono Router', () => {
     expect(sseRes.status).toBe(405);
 
     const wkRes = await app.request(
-      'http://localhost/.well-known/oauth-protected-resource',
+      'https://saintstack.crescoafrica.com/.well-known/oauth-protected-resource',
       { method: 'GET' },
       {
         DATABASE_URL: 'postgres://dummy',
         SAINTSTACK_API_KEY: 'test-secret-key-123',
       }
     );
-    expect(wkRes.status).toBe(404);
+    expect(wkRes.status).toBe(200);
+    const wkBody = (await wkRes.json()) as any;
+    expect(wkBody.resource).toBe('https://saintstack.crescoafrica.com/mcp');
+    expect(wkBody.authorization_servers).toContain('https://saintstack.crescoafrica.com');
+
+    const unauthMcp = await app.request(
+      'https://saintstack.crescoafrica.com/mcp',
+      { method: 'GET' },
+      {
+        DATABASE_URL: 'postgres://dummy',
+        SAINTSTACK_API_KEY: 'test-secret-key-123',
+      }
+    );
+    expect(unauthMcp.status).toBe(401);
+    expect(unauthMcp.headers.get('WWW-Authenticate')).toContain(
+      'resource_metadata="https://saintstack.crescoafrica.com/.well-known/oauth-protected-resource"'
+    );
   });
 });

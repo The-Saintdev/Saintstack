@@ -8,6 +8,17 @@ import { saveMemory, searchMemories, getContextBundle, deleteMemory, getMemoryBy
 import { upsertProject, listProjects, getProject, deleteProject } from './projects';
 import { saveDecision, getDecisions } from './decisions';
 import { saveSession, getLastSession, listSessions } from './sessions';
+import {
+  buildAuthorizationServerMetadata,
+  buildProtectedResourceMetadata,
+  getOrigin,
+  getSigningSecret,
+  handleAuthorizeSubmit,
+  handleDynamicClientRegistration,
+  handleTokenExchange,
+  renderAuthorizeHtml,
+  validateClientAndRedirectUri,
+} from './oauth';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -184,11 +195,140 @@ app.get('/health', (c) => {
   return c.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// --- OAuth 2.1 Discovery & Dynamic Client Registration (MCP Spec) ---
+
+app.get('/.well-known/oauth-protected-resource', (c) => {
+  return c.json(buildProtectedResourceMetadata(getOrigin(c.req.raw)));
+});
+
+app.get('/.well-known/oauth-protected-resource/mcp', (c) => {
+  return c.json(buildProtectedResourceMetadata(getOrigin(c.req.raw)));
+});
+
+app.get('/.well-known/oauth-authorization-server', (c) => {
+  return c.json(buildAuthorizationServerMetadata(getOrigin(c.req.raw)));
+});
+
+app.get('/.well-known/openid-configuration', (c) => {
+  return c.json(buildAuthorizationServerMetadata(getOrigin(c.req.raw)));
+});
+
+app.post('/oauth/register', async (c) => {
+  try {
+    const body = await c.req.json();
+    const secret = getSigningSecret(c.env);
+    const result = await handleDynamicClientRegistration(body, secret);
+    return c.json(result.json, result.status as any);
+  } catch {
+    return c.json({ error: 'invalid_request', error_description: 'Invalid JSON registration payload.' }, 400);
+  }
+});
+
+app.get('/oauth/authorize', async (c) => {
+  const q = c.req.query();
+  const clientId = q.client_id || '';
+  const redirectUri = q.redirect_uri || '';
+  const state = q.state || '';
+  const codeChallenge = q.code_challenge || '';
+  const codeChallengeMethod = q.code_challenge_method || 'S256';
+  const scope = q.scope || 'saintstack:read saintstack:write';
+
+  const secret = getSigningSecret(c.env);
+  const check = await validateClientAndRedirectUri(clientId, redirectUri, secret);
+  if (!check.valid) {
+    return c.html(
+      renderAuthorizeHtml({
+        clientName: check.clientName,
+        clientId,
+        redirectUri,
+        state,
+        codeChallenge,
+        codeChallengeMethod,
+        scope,
+        error: check.reason || 'Invalid OAuth client or redirect URI.',
+      }),
+      400
+    );
+  }
+
+  return c.html(
+    renderAuthorizeHtml({
+      clientName: check.clientName,
+      clientId,
+      redirectUri,
+      state,
+      codeChallenge,
+      codeChallengeMethod,
+      scope,
+    })
+  );
+});
+
+app.post('/oauth/authorize', async (c) => {
+  const contentType = c.req.header('Content-Type') || '';
+  let form: Record<string, string> = {};
+
+  if (contentType.includes('application/x-www-form-urlencoded') || contentType.includes('multipart/form-data')) {
+    const body = await c.req.parseBody();
+    for (const [k, v] of Object.entries(body)) {
+      if (typeof v === 'string') form[k] = v;
+    }
+  } else {
+    try {
+      form = await c.req.json();
+    } catch {
+      return c.text('Invalid form submission', 400);
+    }
+  }
+
+  const db = c.env.DATABASE_URL ? getDb(c.env.DATABASE_URL) : undefined;
+  const result = await handleAuthorizeSubmit(form, c.env, db);
+
+  if (result.redirectUrl) {
+    return c.redirect(result.redirectUrl, 302);
+  }
+  return c.html(result.html || 'Authorization failed', result.status as any);
+});
+
+app.post('/oauth/token', async (c) => {
+  const contentType = c.req.header('Content-Type') || '';
+  let params: Record<string, string> = {};
+
+  if (contentType.includes('application/x-www-form-urlencoded')) {
+    const text = await c.req.text();
+    const sp = new URLSearchParams(text);
+    sp.forEach((v, k) => {
+      params[k] = v;
+    });
+  } else if (contentType.includes('application/json')) {
+    try {
+      params = await c.req.json();
+    } catch {
+      return c.json({ error: 'invalid_request', error_description: 'Invalid JSON body.' }, 400);
+    }
+  } else {
+    const text = await c.req.text();
+    const sp = new URLSearchParams(text);
+    sp.forEach((v, k) => {
+      params[k] = v;
+    });
+  }
+
+  const result = await handleTokenExchange(params, c.env);
+  return c.json(result.json, result.status as any);
+});
+
 // Authentication middleware for /mcp and /api
 app.use('*', async (c, next) => {
   const path = c.req.path;
-  // Skip auth for root, dashboard, health check, and OAuth well-known discovery probes
-  if (path === '/' || path === '/health' || path === '/dashboard' || path.startsWith('/.well-known/')) {
+  // Skip auth for public discovery, dashboard, health check, and OAuth endpoints
+  if (
+    path === '/' ||
+    path === '/health' ||
+    path === '/dashboard' ||
+    path.startsWith('/.well-known/') ||
+    path.startsWith('/oauth/')
+  ) {
     return next();
   }
 
@@ -197,10 +337,15 @@ app.use('*', async (c, next) => {
   const isValid = await validateApiKey(apiKey, c.env, db);
 
   if (!isValid) {
+    const origin = getOrigin(c.req.raw);
+    c.header(
+      'WWW-Authenticate',
+      `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource"`
+    );
     return c.json(
       {
         error: 'Unauthorized',
-        message: 'Valid Bearer token or x-api-key header required. Configure SAINTSTACK_API_KEY.',
+        message: 'Valid Bearer token, OAuth token, or x-api-key header required.',
       },
       401
     );

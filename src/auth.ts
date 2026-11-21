@@ -1,5 +1,6 @@
 import { DatabaseClient } from './db';
 import { Env } from './types';
+import { verifyOAuthAccessToken } from './oauth';
 
 async function sha256(str: string): Promise<string> {
   const msgUint8 = new TextEncoder().encode(str);
@@ -8,7 +9,7 @@ async function sha256(str: string): Promise<string> {
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-export async function validateApiKey(
+export async function validateRawApiKey(
   apiKey: string | undefined | null,
   env: Env,
   db?: DatabaseClient
@@ -47,6 +48,23 @@ export async function validateApiKey(
   }
 
   return false;
+}
+
+export async function validateApiKey(
+  apiKey: string | undefined | null,
+  env: Env,
+  db?: DatabaseClient
+): Promise<boolean> {
+  if (!apiKey) {
+    return false;
+  }
+
+  // OAuth 2.0 Bearer Access Token
+  if (apiKey.startsWith('ss_at_')) {
+    return verifyOAuthAccessToken(apiKey, env);
+  }
+
+  return validateRawApiKey(apiKey, env, db);
 }
 
 export function extractApiKey(request: Request): string | null {

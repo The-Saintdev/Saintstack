@@ -558,8 +558,7 @@ app.post('/api/v1/sessions', async (c) => {
 // Custom Tables & Rows
 app.get('/api/v1/tables', async (c) => {
   const db = getDb(c.env.DATABASE_URL);
-  const projectId = c.req.query('project_id');
-  const tables = await listTables(db, projectId);
+  const tables = await listTables(db);
   return c.json({ count: tables.length, tables });
 });
 
@@ -618,7 +617,7 @@ app.post('/api/v1/tables/:name/rows', async (c) => {
     const items = Array.isArray(body?.rows) ? body.rows : body?.row ? [body.row] : Array.isArray(body) ? body : [body];
     const res = await insertRows(db, c.req.param('name'), items, {
       autoCreate: body?.auto_create !== false,
-      projectId: body?.project_id,
+      autoAddColumns: body?.auto_add_columns !== false,
     });
     return c.json({ message: 'Rows inserted', inserted_count: res.rows.length, table: res.table, rows: res.rows }, 201);
   } catch (err: any) {

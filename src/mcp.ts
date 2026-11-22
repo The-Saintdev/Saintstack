@@ -190,24 +190,26 @@ export const SAINTSTACK_TOOLS: McpTool[] = [
   {
     name: 'saintstack_create_table',
     description:
-      'Create a new custom table (or add/update columns on an existing table) so agents can store structured entries (e.g. job_applications, leads, tasks, expenses).',
+      'Create a real PostgreSQL table (or add columns to an existing table) so agents can store structured entries (e.g. raymond, cresco, job_applications, leads).',
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
-        name: { type: 'string', description: 'Table name (lowercase letters, numbers, underscores, e.g. "leads")' },
-        description: { type: 'string', description: 'What this table stores' },
-        project_id: { type: 'string', description: 'Optional project scope' },
+        name: { type: 'string', description: 'Table name (lowercase letters, numbers, underscores, e.g. "raymond")' },
+        description: { type: 'string', description: 'Table description (stored as PostgreSQL table comment)' },
         columns: {
           type: 'array',
-          description: 'Optional schema column definitions',
+          description: 'Schema column definitions (id, created_at, updated_at are added automatically)',
           items: {
             type: 'object',
             properties: {
               name: { type: 'string', description: 'Column name (lowercase_snake_case)' },
-              type: { type: 'string', enum: ['text', 'number', 'boolean', 'date', 'json'], description: 'Field type (default: text)' },
-              required: { type: 'boolean', description: 'Whether rows must include this field' },
-              description: { type: 'string', description: 'Field description' },
+              type: {
+                type: 'string',
+                enum: ['text', 'number', 'integer', 'boolean', 'date', 'json'],
+                description: 'PostgreSQL field type (default: text)',
+              },
+              required: { type: 'boolean', description: 'Add NOT NULL constraint when creating the table' },
             },
             required: ['name'],
           },
@@ -218,28 +220,26 @@ export const SAINTSTACK_TOOLS: McpTool[] = [
   },
   {
     name: 'saintstack_list_tables',
-    description: 'List custom tables created in SaintStack along with their schemas and row counts.',
+    description: 'List all real custom PostgreSQL tables in SaintStack along with their columns and row counts.',
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: 'object',
-      properties: {
-        project_id: { type: 'string', description: 'Optional project filter' },
-      },
+      properties: {},
     },
   },
   {
     name: 'saintstack_insert_rows',
     description:
-      'Insert one or multiple new row entries into a custom table. Automatically creates the table from the entry fields if it does not exist yet (unless auto_create is false).',
+      'Insert one or multiple rows into a real PostgreSQL table. Automatically creates the table (if auto_create is not false) and adds new columns (if auto_add_columns is not false).',
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
-        table_name: { type: 'string', description: 'Target custom table name' },
+        table_name: { type: 'string', description: 'Target PostgreSQL table name' },
         row: { type: 'object', description: 'Single row object to insert' },
         rows: { type: 'array', items: { type: 'object' }, description: 'Array of row objects for batch insert' },
         auto_create: { type: 'boolean', description: 'Create table automatically if missing (default: true)' },
-        project_id: { type: 'string', description: 'Optional project_id if auto-creating the table' },
+        auto_add_columns: { type: 'boolean', description: 'Automatically ALTER TABLE ADD COLUMN for new keys (default: true)' },
       },
       required: ['table_name'],
     },
@@ -475,7 +475,6 @@ export async function handleMcpRequest(
             const res = await createOrUpdateTable(db, {
               name: args.name,
               description: args.description,
-              project_id: args.project_id,
               columns: args.columns,
             });
             textOutput = JSON.stringify(
@@ -487,7 +486,7 @@ export async function handleMcpRequest(
           }
 
           case 'saintstack_list_tables': {
-            const tables = await listTables(db, args.project_id);
+            const tables = await listTables(db);
             textOutput = JSON.stringify({ count: tables.length, tables }, null, 2);
             break;
           }
@@ -496,7 +495,7 @@ export async function handleMcpRequest(
             const items = Array.isArray(args.rows) ? args.rows : args.row ? [args.row] : [];
             const res = await insertRows(db, args.table_name, items, {
               autoCreate: args.auto_create !== false,
-              projectId: args.project_id,
+              autoAddColumns: args.auto_add_columns !== false,
             });
             textOutput = JSON.stringify(
               { inserted_count: res.rows.length, table: res.table.name, rows: res.rows },

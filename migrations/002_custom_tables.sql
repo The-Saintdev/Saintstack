@@ -1,23 +1,34 @@
--- SaintStack Migration 002: Agent-defined Custom Tables & Rows
--- Allows AI agents to create structured custom tables and insert/query/update/delete rows dynamically.
+-- SaintStack Migration 002: Real Agent-Managed Custom Tables
+-- Creates initial personal and business tables (`raymond` and `cresco`).
+-- Agents can also create, alter, query, and drop additional real tables dynamically via MCP.
 
-CREATE TABLE IF NOT EXISTS custom_tables (
-    name TEXT PRIMARY KEY,
-    project_id TEXT,
-    description TEXT,
-    columns JSONB NOT NULL DEFAULT '[]'::jsonb,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS "raymond" (
+    "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    "topic" TEXT NOT NULL,
+    "key" TEXT,
+    "value" TEXT NOT NULL,
+    "category" TEXT,
+    "source_agent" TEXT,
+    "tags" JSONB DEFAULT '[]'::jsonb,
+    "metadata" JSONB DEFAULT '{}'::jsonb,
+    "created_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS custom_rows (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    table_name TEXT NOT NULL REFERENCES custom_tables(name) ON DELETE CASCADE,
-    data JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+COMMENT ON TABLE "raymond" IS 'Personal knowledge base, preferences, goals, profile, and notes about Raymond.';
+
+CREATE TABLE IF NOT EXISTS "cresco" (
+    "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    "area" TEXT NOT NULL,
+    "title" TEXT NOT NULL,
+    "details" TEXT,
+    "status" TEXT,
+    "url" TEXT,
+    "source_agent" TEXT,
+    "tags" JSONB DEFAULT '[]'::jsonb,
+    "metadata" JSONB DEFAULT '{}'::jsonb,
+    "created_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_custom_tables_project_id ON custom_tables(project_id);
-CREATE INDEX IF NOT EXISTS idx_custom_rows_table_created ON custom_rows(table_name, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_custom_rows_data_gin ON custom_rows USING gin(data);
+COMMENT ON TABLE "cresco" IS 'Cresco Africa projects, products, domains, clients, tasks, links, and operational records.';

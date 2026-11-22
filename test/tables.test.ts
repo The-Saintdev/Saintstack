@@ -2,11 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { handleMcpRequest } from '../src/mcp';
 import { createMockDb } from './mockDb';
 
-describe('SaintStack Custom Tables & Rows via MCP', () => {
+describe('SaintStack Real Postgres Tables & Rows via MCP', () => {
   const db = createMockDb();
 
-  it('creates tables, inserts batch rows, validates required/typed columns, queries, updates, and deletes', async () => {
-    // 1. Rejects reserved core table names
+  it('creates real SQL tables, inserts typed rows, auto-adds columns, queries, updates, and drops tables', async () => {
+    // 1. Rejects reserved core table names and invalid identifiers
     const reservedRes = await handleMcpRequest(
       {
         jsonrpc: '2.0',
@@ -18,7 +18,18 @@ describe('SaintStack Custom Tables & Rows via MCP', () => {
     );
     expect(reservedRes.error?.message).toContain('reserved');
 
-    // 2. Creates a structured table
+    const badIdentRes = await handleMcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 11,
+        method: 'tools/call',
+        params: { name: 'saintstack_create_table', arguments: { name: 'pg_evil' } },
+      },
+      db
+    );
+    expect(badIdentRes.error?.message).toContain('pg_/sql_');
+
+    // 2. Creates a real PostgreSQL table with typed columns
     const createRes = await handleMcpRequest(
       {
         jsonrpc: '2.0',
@@ -27,13 +38,12 @@ describe('SaintStack Custom Tables & Rows via MCP', () => {
         params: {
           name: 'saintstack_create_table',
           arguments: {
-            name: 'job_applications',
-            description: 'Track job outreach and interviews',
+            name: 'raymond',
+            description: 'Everything agents know about Raymond.',
             columns: [
-              { name: 'company', type: 'text', required: true },
-              { name: 'role', type: 'text', required: true },
-              { name: 'salary_k', type: 'number' },
-              { name: 'status', type: 'text' },
+              { name: 'topic', type: 'text', required: true },
+              { name: 'value', type: 'text', required: true },
+              { name: 'priority', type: 'integer' },
             ],
           },
         },
@@ -43,10 +53,11 @@ describe('SaintStack Custom Tables & Rows via MCP', () => {
     expect(createRes.error).toBeUndefined();
     const created = JSON.parse(createRes.result.content[0].text);
     expect(created.created).toBe(true);
-    expect(created.table.name).toBe('job_applications');
-    expect(created.table.columns).toHaveLength(4);
+    expect(created.table.name).toBe('raymond');
+    expect(created.table.description).toBe('Everything agents know about Raymond.');
+    expect(created.table.columns.map((c: any) => c.name)).toContain('topic');
 
-    // 3. Enforces required fields
+    // 3. Enforces required NOT NULL columns
     const invalidRes = await handleMcpRequest(
       {
         jsonrpc: '2.0',
@@ -55,16 +66,16 @@ describe('SaintStack Custom Tables & Rows via MCP', () => {
         params: {
           name: 'saintstack_insert_rows',
           arguments: {
-            table_name: 'job_applications',
-            row: { company: 'Acme' },
+            table_name: 'raymond',
+            row: { topic: 'bio' },
           },
         },
       },
       db
     );
-    expect(invalidRes.error?.message).toContain('Missing required field "role"');
+    expect(invalidRes.error?.message).toContain('Missing required field "value"');
 
-    // 4. Inserts multiple rows
+    // 4. Inserts batch rows and auto-evolves new columns via ALTER TABLE ADD COLUMN
     const insertRes = await handleMcpRequest(
       {
         jsonrpc: '2.0',
@@ -73,10 +84,10 @@ describe('SaintStack Custom Tables & Rows via MCP', () => {
         params: {
           name: 'saintstack_insert_rows',
           arguments: {
-            table_name: 'job_applications',
+            table_name: 'raymond',
             rows: [
-              { company: 'Vercel', role: 'Staff Engineer', salary_k: 220, status: 'applied' },
-              { company: 'Cloudflare', role: 'Systems Engineer', salary_k: 210, status: 'interviewing' },
+              { topic: 'os', value: 'Windows 11', priority: 1, category: 'environment' },
+              { topic: 'brand', value: 'Cresco Africa', priority: 2, category: 'business' },
             ],
           },
         },
@@ -87,17 +98,19 @@ describe('SaintStack Custom Tables & Rows via MCP', () => {
     const inserted = JSON.parse(insertRes.result.content[0].text);
     expect(inserted.inserted_count).toBe(2);
     const firstRowId = inserted.rows[0].id;
+    expect(inserted.rows[0].category).toBe('environment');
 
-    // 5. Lists tables with row counts
+    // 5. Lists real tables with columns and exact row counts
     const listRes = await handleMcpRequest(
       { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'saintstack_list_tables', arguments: {} } },
       db
     );
     const listed = JSON.parse(listRes.result.content[0].text);
     expect(listed.count).toBe(1);
+    expect(listed.tables[0].name).toBe('raymond');
     expect(listed.tables[0].row_count).toBe(2);
 
-    // 6. Queries with filter & text search
+    // 6. Queries directly against real columns with filter & search
     const filterRes = await handleMcpRequest(
       {
         jsonrpc: '2.0',
@@ -105,14 +118,14 @@ describe('SaintStack Custom Tables & Rows via MCP', () => {
         method: 'tools/call',
         params: {
           name: 'saintstack_query_rows',
-          arguments: { table_name: 'job_applications', filter: { status: 'interviewing' } },
+          arguments: { table_name: 'raymond', filter: { category: 'business' } },
         },
       },
       db
     );
     const filtered = JSON.parse(filterRes.result.content[0].text);
     expect(filtered.count).toBe(1);
-    expect(filtered.rows[0].data.company).toBe('Cloudflare');
+    expect(filtered.rows[0].value).toBe('Cresco Africa');
 
     // 7. Updates a row
     const updateRes = await handleMcpRequest(
@@ -122,16 +135,15 @@ describe('SaintStack Custom Tables & Rows via MCP', () => {
         method: 'tools/call',
         params: {
           name: 'saintstack_update_row',
-          arguments: { table_name: 'job_applications', row_id: firstRowId, data: { status: 'offer' } },
+          arguments: { table_name: 'raymond', row_id: firstRowId, data: { value: 'Windows 11 + PowerShell' } },
         },
       },
       db
     );
     const updated = JSON.parse(updateRes.result.content[0].text);
-    expect(updated.row.data.status).toBe('offer');
-    expect(updated.row.data.company).toBe('Vercel');
+    expect(updated.row.value).toBe('Windows 11 + PowerShell');
 
-    // 8. Auto-creates a table when inserting directly without prior create_table
+    // 8. Auto-creates a real SQL table when inserting directly without prior create_table
     const autoInsert = await handleMcpRequest(
       {
         jsonrpc: '2.0',
@@ -140,8 +152,8 @@ describe('SaintStack Custom Tables & Rows via MCP', () => {
         params: {
           name: 'saintstack_insert_rows',
           arguments: {
-            table_name: 'bookmarks',
-            row: { title: 'Nanobrowser', url: 'https://nanobrowser.ai', starred: true },
+            table_name: 'cresco',
+            row: { area: 'product', title: 'SaintStack', active: true },
           },
         },
       },
@@ -149,15 +161,16 @@ describe('SaintStack Custom Tables & Rows via MCP', () => {
     );
     expect(autoInsert.error).toBeUndefined();
     const autoData = JSON.parse(autoInsert.result.content[0].text);
-    expect(autoData.table).toBe('bookmarks');
+    expect(autoData.table).toBe('cresco');
+    expect(autoData.rows[0].title).toBe('SaintStack');
 
-    // 9. Deletes row and table cleanly
+    // 9. Deletes row and drops table cleanly
     const delRow = await handleMcpRequest(
       {
         jsonrpc: '2.0',
         id: 9,
         method: 'tools/call',
-        params: { name: 'saintstack_delete_row', arguments: { table_name: 'job_applications', row_id: firstRowId } },
+        params: { name: 'saintstack_delete_row', arguments: { table_name: 'raymond', row_id: firstRowId } },
       },
       db
     );
@@ -168,7 +181,7 @@ describe('SaintStack Custom Tables & Rows via MCP', () => {
         jsonrpc: '2.0',
         id: 10,
         method: 'tools/call',
-        params: { name: 'saintstack_delete_table', arguments: { table_name: 'bookmarks' } },
+        params: { name: 'saintstack_delete_table', arguments: { table_name: 'cresco' } },
       },
       db
     );

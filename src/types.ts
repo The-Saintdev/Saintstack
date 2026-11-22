@@ -108,7 +108,7 @@ export interface McpTool {
   };
 }
 
-export type CustomColumnType = 'text' | 'number' | 'boolean' | 'date' | 'json';
+export type CustomColumnType = 'text' | 'number' | 'integer' | 'boolean' | 'date' | 'json';
 
 export interface CustomTableColumn {
   name: string;
@@ -119,19 +119,14 @@ export interface CustomTableColumn {
 
 export interface CustomTable {
   name: string;
-  project_id?: string | null;
   description?: string | null;
   columns: CustomTableColumn[];
   row_count?: number;
-  created_at?: string;
-  updated_at?: string;
 }
 
-export interface CustomRow {
+export type CustomRow = Record<string, any> & {
   id: string;
-  table_name: string;
-  data: Record<string, any>;
   created_at?: string;
   updated_at?: string;
-}
+};
 

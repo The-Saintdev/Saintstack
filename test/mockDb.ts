@@ -1,13 +1,25 @@
 import { DatabaseClient } from '../src/db';
-import { Project, Memory, Decision, Session, CustomTable, CustomRow } from '../src/types';
+import { Project, Memory, Decision, Session } from '../src/types';
+
+interface MockColumn {
+  column_name: string;
+  data_type: string;
+  is_nullable: string;
+}
+
+interface MockRealTable {
+  name: string;
+  description: string | null;
+  columns: MockColumn[];
+  rows: Record<string, any>[];
+}
 
 export function createMockDb(): DatabaseClient {
   const projects = new Map<string, Project>();
   const memories = new Map<string, Memory>();
   const decisions = new Map<string, Decision>();
   const sessions: Session[] = [];
-  const customTables = new Map<string, CustomTable>();
-  const customRows = new Map<string, CustomRow>();
+  const realTables = new Map<string, MockRealTable>();
 
   let idCounter = 1;
 
@@ -19,49 +31,123 @@ export function createMockDb(): DatabaseClient {
     }
   };
 
+  const mapSqlTypeToInfoSchema = (sqlType: string): string => {
+    const u = sqlType.toUpperCase();
+    if (u.startsWith('UUID')) return 'uuid';
+    if (u.startsWith('BOOLEAN')) return 'boolean';
+    if (u.startsWith('BIGINT')) return 'bigint';
+    if (u.startsWith('DOUBLE')) return 'double precision';
+    if (u.startsWith('TIMESTAMPTZ')) return 'timestamp with time zone';
+    if (u.startsWith('JSONB')) return 'jsonb';
+    return 'text';
+  };
+
   const mockClient: DatabaseClient = {
     sql: (() => {}) as any,
     async query<T = any>(queryString: string, params: any[] = []): Promise<T[]> {
       assertSqlParams(queryString, params);
       const q = queryString.toLowerCase().replace(/\s+/g, ' ').trim();
 
-      if (q.startsWith('create table if not exists') || q.startsWith('create index if not exists')) {
-        return [] as T[];
-      }
-
-      if (q.startsWith('update custom_tables set updated_at = now()')) {
-        const t = customTables.get(params[0]);
-        if (t) t.updated_at = new Date().toISOString();
-        return [] as T[];
-      }
-
-      // Custom tables list
-      if (q.includes('from custom_tables t') && !q.includes('where t.name = $1')) {
-        let list = Array.from(customTables.values());
-        if (q.includes('where t.project_id = $1')) {
-          list = list.filter((t) => t.project_id === params[0]);
+      // DDL: CREATE TABLE IF NOT EXISTS "name" (...)
+      const createMatch = /^create table if not exists "([a-z0-9_]+)" \((.+)\)$/i.exec(
+        queryString.replace(/\s+/g, ' ').trim()
+      );
+      if (createMatch) {
+        const name = createMatch[1];
+        if (!realTables.has(name)) {
+          const defs = createMatch[2].split(',').map((s) => s.trim());
+          const columns: MockColumn[] = defs.map((d) => {
+            const parts = /^"([a-z0-9_]+)"\s+(.+)$/.exec(d)!;
+            const colName = parts[1];
+            const rest = parts[2];
+            return {
+              column_name: colName,
+              data_type: mapSqlTypeToInfoSchema(rest),
+              is_nullable: rest.includes('NOT NULL') ? 'NO' : 'YES',
+            };
+          });
+          realTables.set(name, { name, description: null, columns, rows: [] });
         }
-        return list.map((t) => ({
-          ...t,
-          row_count: Array.from(customRows.values()).filter((r) => r.table_name === t.name).length,
+        return [] as T[];
+      }
+
+      // DDL: ALTER TABLE "name" ADD COLUMN IF NOT EXISTS "col" TYPE
+      const alterMatch = /^ALTER TABLE "([a-z0-9_]+)" ADD COLUMN IF NOT EXISTS "([a-z0-9_]+)" (.+)$/i.exec(
+        queryString.replace(/\s+/g, ' ').trim()
+      );
+      if (alterMatch) {
+        const [, tableName, colName, sqlType] = alterMatch;
+        const tbl = realTables.get(tableName);
+        if (tbl && !tbl.columns.some((c) => c.column_name === colName)) {
+          tbl.columns.push({
+            column_name: colName,
+            data_type: mapSqlTypeToInfoSchema(sqlType),
+            is_nullable: 'YES',
+          });
+        }
+        return [] as T[];
+      }
+
+      // DDL: COMMENT ON TABLE "name" IS '...'
+      const commentMatch = /^COMMENT ON TABLE "([a-z0-9_]+)" IS '(.*)'$/i.exec(
+        queryString.replace(/\s+/g, ' ').trim()
+      );
+      if (commentMatch) {
+        const tbl = realTables.get(commentMatch[1]);
+        if (tbl) tbl.description = commentMatch[2].replace(/''/g, "'");
+        return [] as T[];
+      }
+
+      // DDL: DROP TABLE IF EXISTS "name"
+      const dropMatch = /^DROP TABLE IF EXISTS "([a-z0-9_]+)"$/i.exec(queryString.replace(/\s+/g, ' ').trim());
+      if (dropMatch) {
+        realTables.delete(dropMatch[1]);
+        return [] as T[];
+      }
+
+      // information_schema.columns
+      if (q.includes('from information_schema.columns')) {
+        const tbl = realTables.get(params[0]);
+        return (tbl ? tbl.columns : []) as unknown as T[];
+      }
+
+      // information_schema.tables (list)
+      if (q.includes('from information_schema.tables') && !q.includes('and t.table_name = $1')) {
+        return Array.from(realTables.values()).map((t) => ({
+          table_name: t.name,
+          description: t.description,
         })) as unknown as T[];
       }
 
-      // Custom rows query
-      if (q.includes('from custom_rows') && q.includes('where table_name = $1')) {
-        const tableName = params[0];
-        let rows = Array.from(customRows.values()).filter((r) => r.table_name === tableName);
-        if (q.includes('data @>')) {
-          const filterParamIdx = 1;
-          const filter = JSON.parse(params[filterParamIdx]);
-          rows = rows.filter((r) => Object.entries(filter).every(([k, v]) => r.data[k] === v));
-        }
-        if (q.includes('data::text ilike')) {
-          const searchIdx = q.includes('data @>') ? 2 : 1;
-          const needle = String(params[searchIdx] || '')
-            .replace(/^%|%$/g, '')
-            .toLowerCase();
-          rows = rows.filter((r) => JSON.stringify(r.data).toLowerCase().includes(needle));
+      // SELECT * FROM "table"
+      const selectMatch = /^SELECT \* FROM "([a-z0-9_]+)"(?:\s+WHERE\s+(.+?))?\s+ORDER BY "created_at" DESC LIMIT \$\d+ OFFSET \$\d+$/i.exec(
+        queryString.replace(/\s+/g, ' ').trim()
+      );
+      if (selectMatch) {
+        const tbl = realTables.get(selectMatch[1]);
+        if (!tbl) return [] as T[];
+        let rows = [...tbl.rows];
+        const wherePart = selectMatch[2];
+        if (wherePart) {
+          const searchMatch = /\(coalesce\(.+ilike \$(\d+)/i.exec(wherePart);
+          const filterMatches = [...wherePart.matchAll(/"([a-z0-9_]+)"\s*=\s*\$(\d+)/gi)];
+          const nullMatches = [...wherePart.matchAll(/"([a-z0-9_]+)" IS NULL/gi)];
+          rows = rows.filter((r) => {
+            for (const fm of filterMatches) {
+              if (r[fm[1]] !== params[Number(fm[2]) - 1]) return false;
+            }
+            for (const nm of nullMatches) {
+              if (r[nm[1]] !== null && r[nm[1]] !== undefined) return false;
+            }
+            if (searchMatch) {
+              const needle = String(params[Number(searchMatch[1]) - 1] || '')
+                .replace(/^%|%$/g, '')
+                .toLowerCase();
+              const hay = JSON.stringify(r).toLowerCase();
+              if (!hay.includes(needle)) return false;
+            }
+            return true;
+          });
         }
         const limit = Number(params[params.length - 2] ?? 25);
         const offset = Number(params[params.length - 1] ?? 0);
@@ -109,88 +195,70 @@ export function createMockDb(): DatabaseClient {
 
     async queryRow<T = any>(queryString: string, params: any[] = []): Promise<T | null> {
       assertSqlParams(queryString, params);
-      const q = queryString.toLowerCase().replace(/\s+/g, ' ').trim();
+      const normalizedSql = queryString.replace(/\s+/g, ' ').trim();
+      const q = normalizedSql.toLowerCase();
 
-      // Custom tables
-      if (q.includes('from custom_tables') && q.includes('where t.name = $1')) {
-        const t = customTables.get(params[0]);
-        if (!t) return null;
-        return {
-          ...t,
-          row_count: Array.from(customRows.values()).filter((r) => r.table_name === t.name).length,
-        } as unknown as T;
+      // information_schema.tables (single)
+      if (q.includes('from information_schema.tables') && q.includes('and t.table_name = $1')) {
+        const tbl = realTables.get(params[0]);
+        return (tbl ? { table_name: tbl.name, description: tbl.description } : null) as unknown as T;
       }
 
-      if (q.includes('from custom_tables where name = $1')) {
-        return (customTables.get(params[0]) || null) as unknown as T;
+      // SELECT COUNT(*)::int AS count FROM "table"
+      const countMatch = /^SELECT COUNT\(\*\)::int AS count FROM "([a-z0-9_]+)"$/i.exec(normalizedSql);
+      if (countMatch) {
+        const tbl = realTables.get(countMatch[1]);
+        return { count: tbl ? tbl.rows.length : 0 } as unknown as T;
       }
 
-      if (q.includes('insert into custom_tables')) {
+      // INSERT INTO "table"
+      const insertMatch = /^INSERT INTO "([a-z0-9_]+)" \(([^)]+)\) VALUES \(([^)]+)\) RETURNING \*$/i.exec(normalizedSql);
+      if (insertMatch) {
+        const tbl = realTables.get(insertMatch[1]);
+        if (!tbl) throw new Error(`relation "${insertMatch[1]}" does not exist`);
+        const cols = insertMatch[2].split(',').map((s) => s.trim().replace(/^"|"$/g, ''));
+        const placeholders = insertMatch[3].split(',').map((s) => s.trim());
         const now = new Date().toISOString();
-        const table: CustomTable = {
-          name: params[0],
-          project_id: params[1] ?? null,
-          description: params[2] ?? null,
-          columns: JSON.parse(params[3] || '[]'),
-          created_at: now,
-          updated_at: now,
-        };
-        customTables.set(table.name, table);
-        return table as unknown as T;
-      }
-
-      if (q.includes('update custom_tables set project_id = coalesce')) {
-        const table = customTables.get(params[0]);
-        if (!table) return null;
-        if (params[1] !== null && params[1] !== undefined) table.project_id = params[1];
-        if (params[2] !== null && params[2] !== undefined) table.description = params[2];
-        table.columns = JSON.parse(params[3] || '[]');
-        table.updated_at = new Date().toISOString();
-        return table as unknown as T;
-      }
-
-      if (q.includes('delete from custom_tables where name = $1')) {
-        const table = customTables.get(params[0]);
-        if (!table) return null;
-        customTables.delete(params[0]);
-        for (const [rowId, r] of customRows.entries()) {
-          if (r.table_name === params[0]) customRows.delete(rowId);
+        const row: Record<string, any> = { id: `row-${idCounter++}`, created_at: now, updated_at: now };
+        for (const c of tbl.columns) {
+          if (!(c.column_name in row)) row[c.column_name] = null;
         }
-        return { name: params[0] } as unknown as T;
+        cols.forEach((colName, i) => {
+          const val = params[i];
+          row[colName] = placeholders[i].includes('::jsonb') && typeof val === 'string' ? JSON.parse(val) : val;
+        });
+        tbl.rows.unshift(row);
+        return { ...row } as unknown as T;
       }
 
-      // Custom rows
-      if (q.includes('insert into custom_rows')) {
-        const id = `row-${idCounter++}`;
-        const now = new Date().toISOString();
-        const row: CustomRow = {
-          id,
-          table_name: params[0],
-          data: JSON.parse(params[1] || '{}'),
-          created_at: now,
-          updated_at: now,
-        };
-        customRows.set(id, row);
-        return row as unknown as T;
+      // UPDATE "table" SET ... WHERE "id" = $N RETURNING *
+      const updateMatch = /^UPDATE "([a-z0-9_]+)" SET (.+) WHERE "id" = \$(\d+) RETURNING \*$/i.exec(normalizedSql);
+      if (updateMatch) {
+        const tbl = realTables.get(updateMatch[1]);
+        if (!tbl) throw new Error(`relation "${updateMatch[1]}" does not exist`);
+        const rowId = params[Number(updateMatch[3]) - 1];
+        const row = tbl.rows.find((r) => r.id === rowId);
+        if (!row) return null;
+        const assigns = updateMatch[2].split(',').map((s) => s.trim());
+        for (const a of assigns) {
+          const m = /^"([a-z0-9_]+)" = \$(\d+)(::jsonb)?$/i.exec(a);
+          if (m) {
+            const val = params[Number(m[2]) - 1];
+            row[m[1]] = m[3] && typeof val === 'string' ? JSON.parse(val) : val;
+          }
+        }
+        row.updated_at = new Date().toISOString();
+        return { ...row } as unknown as T;
       }
 
-      if (q.includes('from custom_rows where id = $1 and table_name = $2')) {
-        const r = customRows.get(params[0]);
-        return (r && r.table_name === params[1] ? r : null) as unknown as T;
-      }
-
-      if (q.includes('update custom_rows set data = $1::jsonb')) {
-        const r = customRows.get(params[1]);
-        if (!r || r.table_name !== params[2]) return null;
-        r.data = JSON.parse(params[0] || '{}');
-        r.updated_at = new Date().toISOString();
-        return r as unknown as T;
-      }
-
-      if (q.includes('delete from custom_rows where id = $1 and table_name = $2')) {
-        const r = customRows.get(params[0]);
-        if (!r || r.table_name !== params[1]) return null;
-        customRows.delete(params[0]);
+      // DELETE FROM "table" WHERE "id" = $1 RETURNING "id"
+      const deleteMatch = /^DELETE FROM "([a-z0-9_]+)" WHERE "id" = \$1 RETURNING "id"$/i.exec(normalizedSql);
+      if (deleteMatch) {
+        const tbl = realTables.get(deleteMatch[1]);
+        if (!tbl) return null;
+        const idx = tbl.rows.findIndex((r) => r.id === params[0]);
+        if (idx === -1) return null;
+        tbl.rows.splice(idx, 1);
         return { id: params[0] } as unknown as T;
       }
 

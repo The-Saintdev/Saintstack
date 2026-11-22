@@ -11,59 +11,18 @@ const RESERVED_TABLES = new Set([
   'custom_rows',
 ]);
 
-const VALID_TYPES = new Set<CustomColumnType>(['text', 'number', 'boolean', 'date', 'json']);
+const SYSTEM_COLUMNS = new Set(['id', 'created_at', 'updated_at']);
+const VALID_TYPES = new Set<CustomColumnType>(['text', 'number', 'integer', 'boolean', 'date', 'json']);
 const IDENTIFIER_RE = /^[a-z][a-z0-9_]{0,62}$/;
-
-const initialized = new WeakMap<DatabaseClient, Promise<void>>();
-
-/**
- * Ensures the custom_tables and custom_rows tables exist in Postgres without requiring manual migrations.
- */
-export async function ensureCustomTablesSchema(db: DatabaseClient): Promise<void> {
-  let pending = initialized.get(db);
-  if (!pending) {
-    pending = (async () => {
-      await db.query(`
-        CREATE TABLE IF NOT EXISTS custom_tables (
-          name TEXT PRIMARY KEY,
-          project_id TEXT,
-          description TEXT,
-          columns JSONB NOT NULL DEFAULT '[]'::jsonb,
-          created_at TIMESTAMPTZ DEFAULT NOW(),
-          updated_at TIMESTAMPTZ DEFAULT NOW()
-        )
-      `);
-      await db.query(`
-        CREATE TABLE IF NOT EXISTS custom_rows (
-          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-          table_name TEXT NOT NULL REFERENCES custom_tables(name) ON DELETE CASCADE,
-          data JSONB NOT NULL DEFAULT '{}'::jsonb,
-          created_at TIMESTAMPTZ DEFAULT NOW(),
-          updated_at TIMESTAMPTZ DEFAULT NOW()
-        )
-      `);
-      await db.query(`CREATE INDEX IF NOT EXISTS idx_custom_tables_project_id ON custom_tables(project_id)`);
-      await db.query(
-        `CREATE INDEX IF NOT EXISTS idx_custom_rows_table_created ON custom_rows(table_name, created_at DESC)`
-      );
-      await db.query(`CREATE INDEX IF NOT EXISTS idx_custom_rows_data_gin ON custom_rows USING gin(data)`);
-    })().catch((err) => {
-      initialized.delete(db);
-      throw err;
-    });
-    initialized.set(db, pending);
-  }
-  await pending;
-}
 
 export function normalizeIdentifier(raw: string, label = 'identifier'): string {
   const normalized = (raw || '')
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, '_');
-  if (!IDENTIFIER_RE.test(normalized)) {
+  if (!IDENTIFIER_RE.test(normalized) || normalized.startsWith('pg_') || normalized.startsWith('sql_')) {
     throw new Error(
-      `Invalid ${label} "${raw}": must start with a letter and contain only lowercase letters, numbers, and underscores (max 63 chars).`
+      `Invalid ${label} "${raw}": must start with a letter, avoid pg_/sql_ prefixes, and contain only lowercase letters, numbers, and underscores (max 63 chars).`
     );
   }
   return normalized;
@@ -89,6 +48,7 @@ export function normalizeColumns(rawColumns: unknown): CustomTableColumn[] {
       throw new Error('Each column definition must be an object.');
     }
     const name = normalizeIdentifier(String((col as any).name || ''), 'column name');
+    if (SYSTEM_COLUMNS.has(name)) continue;
     if (seen.has(name)) {
       throw new Error(`Duplicate column name "${name}".`);
     }
@@ -96,7 +56,7 @@ export function normalizeColumns(rawColumns: unknown): CustomTableColumn[] {
     const rawType = String((col as any).type || 'text').toLowerCase() as CustomColumnType;
     if (!VALID_TYPES.has(rawType)) {
       throw new Error(
-        `Invalid type "${rawType}" for column "${name}". Allowed types: text, number, boolean, date, json.`
+        `Invalid type "${rawType}" for column "${name}". Allowed types: text, number, integer, boolean, date, json.`
       );
     }
     cols.push({
@@ -111,195 +71,194 @@ export function normalizeColumns(rawColumns: unknown): CustomTableColumn[] {
   return cols;
 }
 
+function pgTypeFor(type: CustomColumnType): string {
+  switch (type) {
+    case 'text':
+      return 'TEXT';
+    case 'number':
+      return 'DOUBLE PRECISION';
+    case 'integer':
+      return 'BIGINT';
+    case 'boolean':
+      return 'BOOLEAN';
+    case 'date':
+      return 'TIMESTAMPTZ';
+    case 'json':
+      return 'JSONB';
+  }
+}
+
+function fromPgDataType(pgType: string): CustomColumnType {
+  const t = (pgType || '').toLowerCase();
+  if (t.includes('bool')) return 'boolean';
+  if (t === 'bigint' || t === 'integer' || t === 'smallint') return 'integer';
+  if (t.includes('double') || t.includes('real') || t.includes('numeric') || t.includes('decimal')) return 'number';
+  if (t.includes('timestamp') || t === 'date') return 'date';
+  if (t.includes('json')) return 'json';
+  return 'text';
+}
+
 function inferColumnType(value: unknown): CustomColumnType {
-  if (typeof value === 'number') return 'number';
+  if (typeof value === 'number') return Number.isInteger(value) ? 'integer' : 'number';
   if (typeof value === 'boolean') return 'boolean';
   if (typeof value === 'object' && value !== null) return 'json';
   return 'text';
 }
 
-function validateValue(col: CustomTableColumn, value: unknown): any {
+function sqlStringLiteral(text: string): string {
+  return `'${text.replace(/\0/g, '').replace(/'/g, "''")}'`;
+}
+
+function validateAndFormatValue(col: CustomTableColumn, value: unknown): { value: any; isJson: boolean } {
   if (value === undefined || value === null) {
     if (col.required) {
       throw new Error(`Missing required field "${col.name}".`);
     }
-    return value ?? null;
+    return { value: null, isJson: false };
   }
   switch (col.type) {
     case 'text':
       if (typeof value !== 'string') {
         throw new Error(`Field "${col.name}" must be text (string).`);
       }
-      return value;
+      return { value, isJson: false };
     case 'number':
       if (typeof value !== 'number' || !Number.isFinite(value)) {
         throw new Error(`Field "${col.name}" must be a finite number.`);
       }
-      return value;
+      return { value, isJson: false };
+    case 'integer':
+      if (typeof value !== 'number' || !Number.isInteger(value)) {
+        throw new Error(`Field "${col.name}" must be an integer.`);
+      }
+      return { value, isJson: false };
     case 'boolean':
       if (typeof value !== 'boolean') {
         throw new Error(`Field "${col.name}" must be a boolean.`);
       }
-      return value;
+      return { value, isJson: false };
     case 'date':
       if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) {
         throw new Error(`Field "${col.name}" must be a valid ISO/date string.`);
       }
-      return value;
+      return { value, isJson: false };
     case 'json':
-      return value;
+      return { value: JSON.stringify(value), isJson: true };
   }
 }
 
-function validateRowData(
-  rawData: Record<string, any>,
-  columns: CustomTableColumn[],
-  partial = false
-): Record<string, any> {
-  if (!rawData || typeof rawData !== 'object' || Array.isArray(rawData)) {
-    throw new Error('Row data must be a JSON object.');
-  }
-  const byName = new Map(columns.map((c) => [c.name, c]));
-  const result: Record<string, any> = {};
-
-  if (!partial) {
-    for (const col of columns) {
-      if (col.required && (rawData[col.name] === undefined || rawData[col.name] === null)) {
-        throw new Error(`Missing required field "${col.name}".`);
-      }
-    }
-  }
-
-  for (const [key, val] of Object.entries(rawData)) {
-    const col = byName.get(key);
-    if (col) {
-      result[key] = validateValue(col, val);
-    } else {
-      result[key] = val;
-    }
-  }
-  return result;
+async function fetchTableColumns(db: DatabaseClient, tableName: string): Promise<CustomTableColumn[]> {
+  const rows = await db.query<{ column_name: string; data_type: string; is_nullable: string }>(
+    `SELECT column_name, data_type, is_nullable
+     FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = $1
+     ORDER BY ordinal_position ASC`,
+    [tableName]
+  );
+  return rows.map((r) => ({
+    name: r.column_name,
+    type: fromPgDataType(r.data_type),
+    ...(r.is_nullable === 'NO' && !SYSTEM_COLUMNS.has(r.column_name) ? { required: true } : {}),
+  }));
 }
 
-function parseTableRecord(row: any): CustomTable {
-  const columns = typeof row.columns === 'string' ? JSON.parse(row.columns) : row.columns || [];
+async function fetchTableMeta(
+  db: DatabaseClient,
+  tableName: string
+): Promise<{ description: string | null } | null> {
+  const row = await db.queryRow<{ table_name: string; description: string | null }>(
+    `SELECT t.table_name, obj_description(('public.' || quote_ident(t.table_name))::regclass, 'pg_class') AS description
+     FROM information_schema.tables t
+     WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE' AND t.table_name = $1`,
+    [tableName]
+  );
+  return row ? { description: row.description ?? null } : null;
+}
+
+export async function getTable(db: DatabaseClient, rawName: string): Promise<CustomTable | null> {
+  const tableName = normalizeTableName(rawName);
+  const meta = await fetchTableMeta(db, tableName);
+  if (!meta) return null;
+
+  const columns = await fetchTableColumns(db, tableName);
+  const countRow = await db.queryRow<{ count: number }>(`SELECT COUNT(*)::int AS count FROM "${tableName}"`);
+
   return {
-    name: row.name,
-    project_id: row.project_id ?? null,
-    description: row.description ?? null,
+    name: tableName,
+    description: meta.description,
     columns,
-    ...(row.row_count !== undefined ? { row_count: Number(row.row_count) } : {}),
-    created_at: row.created_at,
-    updated_at: row.updated_at,
+    row_count: Number(countRow?.count ?? 0),
   };
 }
 
-function parseRowRecord(row: any): CustomRow {
-  const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data || {};
-  return {
-    id: row.id,
-    table_name: row.table_name,
-    data,
-    created_at: row.created_at,
-    updated_at: row.updated_at,
-  };
+export async function listTables(db: DatabaseClient): Promise<CustomTable[]> {
+  const excluded = Array.from(RESERVED_TABLES).map(sqlStringLiteral).join(', ');
+  const tableRows = await db.query<{ table_name: string; description: string | null }>(
+    `SELECT t.table_name, obj_description(('public.' || quote_ident(t.table_name))::regclass, 'pg_class') AS description
+     FROM information_schema.tables t
+     WHERE t.table_schema = 'public'
+       AND t.table_type = 'BASE TABLE'
+       AND t.table_name NOT IN (${excluded})
+     ORDER BY t.table_name ASC`
+  );
+
+  const tables: CustomTable[] = [];
+  for (const row of tableRows) {
+    const columns = await fetchTableColumns(db, row.table_name);
+    const countRow = await db.queryRow<{ count: number }>(`SELECT COUNT(*)::int AS count FROM "${row.table_name}"`);
+    tables.push({
+      name: row.table_name,
+      description: row.description ?? null,
+      columns,
+      row_count: Number(countRow?.count ?? 0),
+    });
+  }
+  return tables;
 }
 
 export async function createOrUpdateTable(
   db: DatabaseClient,
   input: {
     name: string;
-    project_id?: string | null;
     description?: string | null;
     columns?: CustomTableColumn[];
   }
 ): Promise<{ table: CustomTable; created: boolean }> {
-  await ensureCustomTablesSchema(db);
   const tableName = normalizeTableName(input.name);
-  const newCols = normalizeColumns(input.columns);
-  const projectId = input.project_id ? input.project_id.trim() : null;
-  const description = input.description !== undefined ? input.description : null;
+  const cols = normalizeColumns(input.columns);
+  const existing = await getTable(db, tableName);
 
-  const existingRow = await db.queryRow<any>(
-    `SELECT name, project_id, description, columns, created_at, updated_at FROM custom_tables WHERE name = $1`,
-    [tableName]
-  );
-
-  if (existingRow) {
-    const existing = parseTableRecord(existingRow);
-    const mergedMap = new Map(existing.columns.map((c) => [c.name, c]));
-    for (const c of newCols) {
-      mergedMap.set(c.name, c);
+  if (!existing) {
+    const colDefs = [
+      `"id" UUID PRIMARY KEY DEFAULT gen_random_uuid()`,
+      ...cols.map((c) => `"${c.name}" ${pgTypeFor(c.type)}${c.required ? ' NOT NULL' : ''}`),
+      `"created_at" TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+      `"updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+    ];
+    await db.query(`CREATE TABLE IF NOT EXISTS "${tableName}" (${colDefs.join(', ')})`);
+    if (typeof input.description === 'string' && input.description.trim()) {
+      await db.query(`COMMENT ON TABLE "${tableName}" IS ${sqlStringLiteral(input.description.trim())}`);
     }
-    const mergedCols = Array.from(mergedMap.values());
-    const updatedRow = await db.queryRow<any>(
-      `UPDATE custom_tables
-       SET project_id = COALESCE($2, project_id),
-           description = COALESCE($3, description),
-           columns = $4::jsonb,
-           updated_at = NOW()
-       WHERE name = $1
-       RETURNING name, project_id, description, columns, created_at, updated_at`,
-      [tableName, projectId, description, JSON.stringify(mergedCols)]
-    );
-    return { table: parseTableRecord(updatedRow || { ...existing, columns: mergedCols }), created: false };
+    const table = (await getTable(db, tableName))!;
+    return { table, created: true };
   }
 
-  const inserted = await db.queryRow<any>(
-    `INSERT INTO custom_tables (name, project_id, description, columns)
-     VALUES ($1, $2, $3, $4::jsonb)
-     RETURNING name, project_id, description, columns, created_at, updated_at`,
-    [tableName, projectId, description, JSON.stringify(newCols)]
-  );
-  return { table: parseTableRecord(inserted), created: true };
-}
-
-export async function getTable(db: DatabaseClient, rawName: string): Promise<CustomTable | null> {
-  await ensureCustomTablesSchema(db);
-  const tableName = normalizeTableName(rawName);
-  const row = await db.queryRow<any>(
-    `SELECT t.name, t.project_id, t.description, t.columns, t.created_at, t.updated_at,
-            COUNT(r.id)::int AS row_count
-     FROM custom_tables t
-     LEFT JOIN custom_rows r ON r.table_name = t.name
-     WHERE t.name = $1
-     GROUP BY t.name`,
-    [tableName]
-  );
-  return row ? parseTableRecord(row) : null;
-}
-
-export async function listTables(db: DatabaseClient, projectId?: string): Promise<CustomTable[]> {
-  await ensureCustomTablesSchema(db);
-  const rows = projectId
-    ? await db.query<any>(
-        `SELECT t.name, t.project_id, t.description, t.columns, t.created_at, t.updated_at,
-                COUNT(r.id)::int AS row_count
-         FROM custom_tables t
-         LEFT JOIN custom_rows r ON r.table_name = t.name
-         WHERE t.project_id = $1
-         GROUP BY t.name
-         ORDER BY t.updated_at DESC`,
-        [projectId.trim()]
-      )
-    : await db.query<any>(
-        `SELECT t.name, t.project_id, t.description, t.columns, t.created_at, t.updated_at,
-                COUNT(r.id)::int AS row_count
-         FROM custom_tables t
-         LEFT JOIN custom_rows r ON r.table_name = t.name
-         GROUP BY t.name
-         ORDER BY t.updated_at DESC`
-      );
-  return rows.map(parseTableRecord);
+  for (const col of cols) {
+    await db.query(`ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "${col.name}" ${pgTypeFor(col.type)}`);
+  }
+  if (typeof input.description === 'string' && input.description.trim()) {
+    await db.query(`COMMENT ON TABLE "${tableName}" IS ${sqlStringLiteral(input.description.trim())}`);
+  }
+  const table = (await getTable(db, tableName))!;
+  return { table, created: false };
 }
 
 export async function insertRows(
   db: DatabaseClient,
   rawTableName: string,
   items: Record<string, any>[],
-  options: { autoCreate?: boolean; projectId?: string } = {}
+  options: { autoCreate?: boolean; autoAddColumns?: boolean } = {}
 ): Promise<{ table: CustomTable; rows: CustomRow[] }> {
-  await ensureCustomTablesSchema(db);
   if (!Array.isArray(items) || items.length === 0) {
     throw new Error('Provide a non-empty row object or rows array to insert.');
   }
@@ -307,41 +266,86 @@ export async function insertRows(
   const tableName = normalizeTableName(rawTableName);
   let table = await getTable(db, tableName);
 
+  const inferFromItems = (): CustomTableColumn[] => {
+    const inferred: CustomTableColumn[] = [];
+    const seen = new Set<string>();
+    for (const item of items) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        throw new Error('Each row must be a JSON object.');
+      }
+      for (const [rawKey, val] of Object.entries(item)) {
+        const key = normalizeIdentifier(rawKey, 'column name');
+        if (SYSTEM_COLUMNS.has(key) || seen.has(key)) continue;
+        seen.add(key);
+        inferred.push({ name: key, type: inferColumnType(val) });
+      }
+    }
+    return inferred;
+  };
+
   if (!table) {
     if (options.autoCreate === false) {
       throw new Error(`Table "${tableName}" does not exist. Create it first with saintstack_create_table.`);
     }
-    const inferredCols: CustomTableColumn[] = [];
-    const seen = new Set<string>();
-    for (const item of items) {
-      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
-      for (const [key, val] of Object.entries(item)) {
-        if (seen.has(key) || !IDENTIFIER_RE.test(key)) continue;
-        seen.add(key);
-        inferredCols.push({ name: key, type: inferColumnType(val) });
+    const created = await createOrUpdateTable(db, { name: tableName, columns: inferFromItems() });
+    table = created.table;
+  } else if (options.autoAddColumns !== false) {
+    const existingNames = new Set(table.columns.map((c) => c.name));
+    const missing = inferFromItems().filter((c) => !existingNames.has(c.name));
+    if (missing.length > 0) {
+      for (const col of missing) {
+        await db.query(`ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "${col.name}" ${pgTypeFor(col.type)}`);
+      }
+      table = (await getTable(db, tableName))!;
+    }
+  }
+
+  const colMap = new Map(table.columns.map((c) => [c.name, c]));
+  const inserted: CustomRow[] = [];
+
+  for (const item of items) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error('Each row must be a JSON object.');
+    }
+
+    // Check required user columns
+    for (const col of table.columns) {
+      if (col.required && (item[col.name] === undefined || item[col.name] === null)) {
+        // Also check normalized key match
+        const matchKey = Object.keys(item).find((k) => normalizeIdentifier(k, 'column name') === col.name);
+        if (!matchKey || item[matchKey] === undefined || item[matchKey] === null) {
+          throw new Error(`Missing required field "${col.name}".`);
+        }
       }
     }
-    const created = await createOrUpdateTable(db, {
-      name: tableName,
-      project_id: options.projectId || null,
-      columns: inferredCols,
-    });
-    table = created.table;
+
+    const colNames: string[] = [];
+    const placeholders: string[] = [];
+    const params: any[] = [];
+
+    for (const [rawKey, rawVal] of Object.entries(item)) {
+      const key = normalizeIdentifier(rawKey, 'column name');
+      if (SYSTEM_COLUMNS.has(key)) continue;
+      const col = colMap.get(key);
+      if (!col) {
+        throw new Error(`Unknown column "${key}" on table "${tableName}".`);
+      }
+      const formatted = validateAndFormatValue(col, rawVal);
+      params.push(formatted.value);
+      colNames.push(`"${col.name}"`);
+      placeholders.push(formatted.isJson ? `$${params.length}::jsonb` : `$${params.length}`);
+    }
+
+    const sql =
+      colNames.length > 0
+        ? `INSERT INTO "${tableName}" (${colNames.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING *`
+        : `INSERT INTO "${tableName}" DEFAULT VALUES RETURNING *`;
+
+    const row = await db.queryRow<CustomRow>(sql, params);
+    if (row) inserted.push(row);
   }
 
-  const inserted: CustomRow[] = [];
-  for (const item of items) {
-    const cleanData = validateRowData(item, table.columns, false);
-    const row = await db.queryRow<any>(
-      `INSERT INTO custom_rows (table_name, data)
-       VALUES ($1, $2::jsonb)
-       RETURNING id, table_name, data, created_at, updated_at`,
-      [tableName, JSON.stringify(cleanData)]
-    );
-    inserted.push(parseRowRecord(row));
-  }
-
-  await db.query(`UPDATE custom_tables SET updated_at = NOW() WHERE name = $1`, [tableName]);
+  table = (await getTable(db, tableName))!;
   return { table, rows: inserted };
 }
 
@@ -350,90 +354,133 @@ export async function queryRows(
   rawTableName: string,
   options: { filter?: Record<string, any>; search?: string; limit?: number; offset?: number } = {}
 ): Promise<{ table: CustomTable; rows: CustomRow[] }> {
-  await ensureCustomTablesSchema(db);
   const tableName = normalizeTableName(rawTableName);
   const table = await getTable(db, tableName);
   if (!table) {
     throw new Error(`Table "${tableName}" does not exist.`);
   }
 
-  const conditions: string[] = ['table_name = $1'];
-  const params: any[] = [tableName];
-  let idx = 2;
+  const colMap = new Map(table.columns.map((c) => [c.name, c]));
+  const conditions: string[] = [];
+  const params: any[] = [];
 
-  if (options.filter && typeof options.filter === 'object' && Object.keys(options.filter).length > 0) {
-    conditions.push(`data @> $${idx++}::jsonb`);
-    params.push(JSON.stringify(options.filter));
+  if (options.filter && typeof options.filter === 'object' && !Array.isArray(options.filter)) {
+    for (const [rawKey, val] of Object.entries(options.filter)) {
+      const key = normalizeIdentifier(rawKey, 'column name');
+      const col = colMap.get(key);
+      if (!col) {
+        throw new Error(`Unknown filter column "${key}" on table "${tableName}".`);
+      }
+      if (val === null) {
+        conditions.push(`"${key}" IS NULL`);
+      } else if (col.type === 'json' && typeof val === 'object') {
+        params.push(JSON.stringify(val));
+        conditions.push(`"${key}" @> $${params.length}::jsonb`);
+      } else {
+        params.push(val);
+        conditions.push(`"${key}" = $${params.length}`);
+      }
+    }
   }
+
   if (options.search && options.search.trim()) {
-    conditions.push(`data::text ILIKE $${idx++}`);
-    params.push(`%${options.search.trim()}%`);
+    const searchable = table.columns.filter((c) => !SYSTEM_COLUMNS.has(c.name));
+    if (searchable.length > 0) {
+      params.push(`%${options.search.trim()}%`);
+      const pIdx = params.length;
+      const ors = searchable.map((c) => `COALESCE("${c.name}"::text, '') ILIKE $${pIdx}`);
+      conditions.push(`(${ors.join(' OR ')})`);
+    }
   }
 
   const limit = Math.min(200, Math.max(1, options.limit ?? 25));
   const offset = Math.max(0, options.offset ?? 0);
   params.push(limit, offset);
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-  const rows = await db.query<any>(
-    `SELECT id, table_name, data, created_at, updated_at
-     FROM custom_rows
-     WHERE ${conditions.join(' AND ')}
-     ORDER BY created_at DESC
-     LIMIT $${idx++} OFFSET $${idx}`,
+  const rows = await db.query<CustomRow>(
+    `SELECT * FROM "${tableName}" ${whereClause} ORDER BY "created_at" DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
   );
 
-  return { table, rows: rows.map(parseRowRecord) };
+  return { table, rows };
 }
 
 export async function updateRow(
   db: DatabaseClient,
   rawTableName: string,
   rowId: string,
-  patch: Record<string, any>
+  patch: Record<string, any>,
+  options: { autoAddColumns?: boolean } = {}
 ): Promise<CustomRow> {
-  await ensureCustomTablesSchema(db);
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    throw new Error('Update data must be a non-empty JSON object.');
+  }
+  const tableName = normalizeTableName(rawTableName);
+  let table = await getTable(db, tableName);
+  if (!table) {
+    throw new Error(`Table "${tableName}" does not exist.`);
+  }
+
+  if (options.autoAddColumns !== false) {
+    const existingNames = new Set(table.columns.map((c) => c.name));
+    for (const [rawKey, val] of Object.entries(patch)) {
+      const key = normalizeIdentifier(rawKey, 'column name');
+      if (SYSTEM_COLUMNS.has(key) || existingNames.has(key)) continue;
+      await db.query(
+        `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "${key}" ${pgTypeFor(inferColumnType(val))}`
+      );
+      existingNames.add(key);
+    }
+    table = (await getTable(db, tableName))!;
+  }
+
+  const colMap = new Map(table.columns.map((c) => [c.name, c]));
+  const assignments: string[] = [];
+  const params: any[] = [];
+
+  for (const [rawKey, rawVal] of Object.entries(patch)) {
+    const key = normalizeIdentifier(rawKey, 'column name');
+    if (SYSTEM_COLUMNS.has(key)) continue;
+    const col = colMap.get(key);
+    if (!col) {
+      throw new Error(`Unknown column "${key}" on table "${tableName}".`);
+    }
+    const formatted = validateAndFormatValue(col, rawVal);
+    params.push(formatted.value);
+    assignments.push(`"${key}" = $${params.length}${formatted.isJson ? '::jsonb' : ''}`);
+  }
+
+  if (assignments.length === 0) {
+    throw new Error('Provide at least one editable column to update.');
+  }
+  assignments.push(`"updated_at" = NOW()`);
+  params.push(rowId);
+
+  const updated = await db.queryRow<CustomRow>(
+    `UPDATE "${tableName}" SET ${assignments.join(', ')} WHERE "id" = $${params.length} RETURNING *`,
+    params
+  );
+  if (!updated) {
+    throw new Error(`Row "${rowId}" not found in table "${tableName}".`);
+  }
+  return updated;
+}
+
+export async function deleteRow(db: DatabaseClient, rawTableName: string, rowId: string): Promise<boolean> {
   const tableName = normalizeTableName(rawTableName);
   const table = await getTable(db, tableName);
   if (!table) {
     throw new Error(`Table "${tableName}" does not exist.`);
   }
-
-  const cleanPatch = validateRowData(patch, table.columns, true);
-  const existing = await db.queryRow<any>(
-    `SELECT id, table_name, data, created_at, updated_at FROM custom_rows WHERE id = $1 AND table_name = $2`,
-    [rowId, tableName]
-  );
-  if (!existing) {
-    throw new Error(`Row "${rowId}" not found in table "${tableName}".`);
-  }
-
-  const current = parseRowRecord(existing);
-  const mergedData = { ...current.data, ...cleanPatch };
-  const updated = await db.queryRow<any>(
-    `UPDATE custom_rows
-     SET data = $1::jsonb, updated_at = NOW()
-     WHERE id = $2 AND table_name = $3
-     RETURNING id, table_name, data, created_at, updated_at`,
-    [JSON.stringify(mergedData), rowId, tableName]
-  );
-  await db.query(`UPDATE custom_tables SET updated_at = NOW() WHERE name = $1`, [tableName]);
-  return parseRowRecord(updated);
-}
-
-export async function deleteRow(db: DatabaseClient, rawTableName: string, rowId: string): Promise<boolean> {
-  await ensureCustomTablesSchema(db);
-  const tableName = normalizeTableName(rawTableName);
-  const row = await db.queryRow<any>(
-    `DELETE FROM custom_rows WHERE id = $1 AND table_name = $2 RETURNING id`,
-    [rowId, tableName]
-  );
+  const row = await db.queryRow<{ id: string }>(`DELETE FROM "${tableName}" WHERE "id" = $1 RETURNING "id"`, [rowId]);
   return !!row;
 }
 
 export async function deleteTable(db: DatabaseClient, rawTableName: string): Promise<boolean> {
-  await ensureCustomTablesSchema(db);
   const tableName = normalizeTableName(rawTableName);
-  const row = await db.queryRow<any>(`DELETE FROM custom_tables WHERE name = $1 RETURNING name`, [tableName]);
-  return !!row;
+  const existing = await getTable(db, tableName);
+  if (!existing) return false;
+  await db.query(`DROP TABLE IF EXISTS "${tableName}"`);
+  return true;
 }

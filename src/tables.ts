@@ -11,6 +11,8 @@ const RESERVED_TABLES = new Set([
   'custom_rows',
 ]);
 
+const PROTECTED_TABLES = new Set(['raymond', 'cresco']);
+
 const SYSTEM_COLUMNS = new Set(['id', 'created_at', 'updated_at']);
 const VALID_TYPES = new Set<CustomColumnType>(['text', 'number', 'integer', 'boolean', 'date', 'json']);
 const IDENTIFIER_RE = /^[a-z][a-z0-9_]{0,62}$/;
@@ -479,6 +481,9 @@ export async function deleteRow(db: DatabaseClient, rawTableName: string, rowId:
 
 export async function deleteTable(db: DatabaseClient, rawTableName: string): Promise<boolean> {
   const tableName = normalizeTableName(rawTableName);
+  if (PROTECTED_TABLES.has(tableName)) {
+    throw new Error(`Table "${tableName}" is protected and cannot be deleted.`);
+  }
   const existing = await getTable(db, tableName);
   if (!existing) return false;
   await db.query(`DROP TABLE IF EXISTS "${tableName}"`);

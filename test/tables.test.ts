@@ -164,7 +164,30 @@ describe('SaintStack Real Postgres Tables & Rows via MCP', () => {
     expect(autoData.table).toBe('cresco');
     expect(autoData.rows[0].title).toBe('SaintStack');
 
-    // 9. Deletes row and drops table cleanly
+    // 9. Protects raymond and cresco from table deletion while allowing temporary tables to be dropped
+    const delRaymond = await handleMcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 90,
+        method: 'tools/call',
+        params: { name: 'saintstack_delete_table', arguments: { table_name: 'raymond' } },
+      },
+      db
+    );
+    expect(delRaymond.error?.message).toContain('protected');
+
+    const delCresco = await handleMcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 91,
+        method: 'tools/call',
+        params: { name: 'saintstack_delete_table', arguments: { table_name: 'cresco' } },
+      },
+      db
+    );
+    expect(delCresco.error?.message).toContain('protected');
+
+    // 10. Deletes row and drops non-protected table cleanly
     const delRow = await handleMcpRequest(
       {
         jsonrpc: '2.0',
@@ -176,12 +199,21 @@ describe('SaintStack Real Postgres Tables & Rows via MCP', () => {
     );
     expect(JSON.parse(delRow.result.content[0].text).deleted).toBe(true);
 
+    await handleMcpRequest(
+      {
+        jsonrpc: '2.0',
+        id: 92,
+        method: 'tools/call',
+        params: { name: 'saintstack_insert_rows', arguments: { table_name: 'scratch_tmp', row: { note: 'temp' } } },
+      },
+      db
+    );
     const delTable = await handleMcpRequest(
       {
         jsonrpc: '2.0',
         id: 10,
         method: 'tools/call',
-        params: { name: 'saintstack_delete_table', arguments: { table_name: 'cresco' } },
+        params: { name: 'saintstack_delete_table', arguments: { table_name: 'scratch_tmp' } },
       },
       db
     );
